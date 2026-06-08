@@ -7,8 +7,10 @@ import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
 import 'package:offline_chat/services/context/context_manager_service.dart';
+import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
+import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 // Events
 sealed class ChatEvent extends Equatable {
@@ -70,14 +72,16 @@ class ChatStreaming extends ChatState {
   final List<MessageModel> messages;
   final String streamingText;
   final String streamingId;
+  final List<SearchResult>? ragResults;
   const ChatStreaming({
     required this.messages,
     required this.streamingText,
     required this.streamingId,
+    this.ragResults,
   });
 
   @override
-  List<Object?> get props => [messages, streamingText, streamingId];
+  List<Object?> get props => [messages, streamingText, streamingId, ragResults];
 }
 
 class ChatError extends ChatState {
@@ -98,6 +102,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   final SessionRepository _sessionRepo;
   final ContextManagerService _contextManager;
   final GemmaService _gemmaService;
+  final GeckoService _geckoService;
+  final VectorStoreService _vectorStore;
   final PromptBuilderService _promptBuilder;
   final Uuid _uuid = const Uuid();
 
@@ -108,11 +114,15 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     required SessionRepository sessionRepo,
     required ContextManagerService contextManager,
     required GemmaService gemmaService,
+    required GeckoService geckoService,
+    required VectorStoreService vectorStore,
     required PromptBuilderService promptBuilder,
   })  : _messageRepo = messageRepo,
         _sessionRepo = sessionRepo,
         _contextManager = contextManager,
         _gemmaService = gemmaService,
+        _geckoService = geckoService,
+        _vectorStore = vectorStore,
         _promptBuilder = promptBuilder,
         super(const ChatInitial()) {
     on<SessionInitialized>(_onSessionInitialized);
@@ -162,17 +172,33 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       ];
       emit(ChatLoaded(currentMessages));
 
-      // 2. Build context (RAG will be added in Phase 3)
+      // 2. RAG retrieval
+      List<SearchResult> ragResults = [];
+      if (_geckoService.isReady) {
+        try {
+          final queryVector = await _geckoService.embed(event.content);
+          ragResults = await _vectorStore.search(
+            queryVector: queryVector,
+            topK: 5,
+            threshold: 0.7,
+          );
+        } catch (_) {
+          // Graceful degradation: chat continues without RAG on embedding failure
+          ragResults = [];
+        }
+      }
+
+      // 3. Build context (with RAG results)
       final context = await _contextManager.buildContext(
         question: event.content,
         sessionId: _currentSessionId!,
-        ragResults: [],
+        ragResults: ragResults,
       );
 
-      // 3. Build prompt
+      // 4. Build prompt
       final prompt = _promptBuilder.build(context);
 
-      // 4. Stream response
+      // 5. Stream response
       final assistantMsgId = _uuid.v4();
       String accumulated = '';
 
@@ -184,19 +210,20 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             messages: currentMessages,
             streamingText: accumulated,
             streamingId: assistantMsgId,
+            ragResults: ragResults.isNotEmpty ? ragResults : null,
           );
         },
         onError: (error, _) => ChatError(message: error.toString()),
       );
 
-      // 5. Save complete assistant message
+      // 6. Save complete assistant message
       final assistantMsg = await _messageRepo.saveMessage(
         sessionId: _currentSessionId!,
         role: MessageRole.assistant,
         content: accumulated,
       );
 
-      // 6. Update session timestamp
+      // 7. Update session timestamp
       await _sessionRepo.updateSessionTimestamp(_currentSessionId!);
 
       emit(ChatLoaded(<MessageModel>[...currentMessages, assistantMsg]));

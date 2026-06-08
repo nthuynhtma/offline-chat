@@ -1,6 +1,7 @@
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
+import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 class ContextManagerService {
   final MessageRepository _messageRepo;
@@ -22,6 +23,19 @@ class ContextManagerService {
 
     bool historyTrimmed = false;
     int estimatedTokens = _estimateTokens(question);
+
+    // Trim RAG if over budget
+    int usedRagTokens = 0;
+    final trimmedRag = <SearchResult>[];
+    for (final result in ragResults) {
+      final t = _estimateTokens(result.chunkText);
+      if (usedRagTokens + t <= ragBudget) {
+        trimmedRag.add(result);
+        usedRagTokens += t;
+      } else {
+        break;
+      }
+    }
 
     // Trim history if over budget
     int totalHistoryTokens = 0;
@@ -50,10 +64,10 @@ class ContextManagerService {
 
     return BuiltContext(
       question: question,
-      relevantChunks: ragResults,
+      relevantChunks: trimmedRag,
       history: history,
       historyWasTrimmed: historyTrimmed,
-      estimatedTokens: estimatedTokens,
+      estimatedTokens: estimatedTokens + usedRagTokens,
     );
   }
 

@@ -44,6 +44,7 @@ Future<void> setupLocator() async {
       sl<DocumentParserService>(),
       sl<ChunkingService>(),
       sl<VectorStoreService>(),
+      sl<GeckoService>(),
     ),
   );
 
@@ -59,6 +60,8 @@ Future<void> setupLocator() async {
       sessionRepo: sl<SessionRepository>(),
       contextManager: sl<ContextManagerService>(),
       gemmaService: sl<GemmaService>(),
+      geckoService: sl<GeckoService>(),
+      vectorStore: sl<VectorStoreService>(),
       promptBuilder: sl<PromptBuilderService>(),
     ),
   );

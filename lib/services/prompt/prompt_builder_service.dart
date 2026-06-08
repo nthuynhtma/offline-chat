@@ -1,16 +1,5 @@
 import 'package:offline_chat/features/chat/models/message_model.dart';
-
-class SearchResult {
-  final String chunkId;
-  final double score;
-  final String chunkText;
-
-  const SearchResult({
-    required this.chunkId,
-    required this.score,
-    required this.chunkText,
-  });
-}
+import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 class BuiltContext {
   final String question;

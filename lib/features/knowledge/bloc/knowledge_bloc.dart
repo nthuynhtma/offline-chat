@@ -67,14 +67,16 @@ class KnowledgeLoaded extends KnowledgeState {
 
 class KnowledgeIndexing extends KnowledgeState {
   final String documentId;
+  final String documentName;
   final double progress;
   const KnowledgeIndexing({
     required this.documentId,
+    required this.documentName,
     required this.progress,
   });
 
   @override
-  List<Object?> get props => [documentId, progress];
+  List<Object?> get props => [documentId, documentName, progress];
 }
 
 class KnowledgeError extends KnowledgeState {
@@ -114,8 +116,21 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     Emitter<KnowledgeState> emit,
   ) async {
     try {
-      emit(const KnowledgeLoading());
-      await _documentRepository.importDocument(event.filePath);
+      final fileName = event.filePath.split('/').last;
+
+      await _documentRepository.importDocumentWithProgress(
+        event.filePath,
+        onProgress: (documentId, progress) {
+          if (progress < 1.0) {
+            emit(KnowledgeIndexing(
+              documentId: documentId,
+              documentName: fileName,
+              progress: progress,
+            ));
+          }
+        },
+      );
+
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {

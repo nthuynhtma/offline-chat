@@ -10,6 +10,7 @@ import 'package:offline_chat/core/errors/app_exception.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/features/knowledge/models/document_model.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
+import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
@@ -19,6 +20,13 @@ abstract interface class DocumentRepository {
   Future<DocumentModel> importDocument(String filePath);
   Future<void> deleteDocument(String id);
   Future<void> reindexDocument(String id);
+
+  /// Import with progress callback [onProgress] (0.0 to 1.0).
+  /// The callback receives [documentId] (once known) and [progress].
+  Future<DocumentModel> importDocumentWithProgress(
+    String filePath, {
+    void Function(String documentId, double progress)? onProgress,
+  });
 }
 
 class DocumentRepositoryImpl implements DocumentRepository {
@@ -26,6 +34,7 @@ class DocumentRepositoryImpl implements DocumentRepository {
   final DocumentParserService _parser;
   final ChunkingService _chunker;
   final VectorStoreService _vectorStore;
+  final GeckoService _geckoService;
   final Uuid _uuid = const Uuid();
 
   DocumentRepositoryImpl(
@@ -33,6 +42,7 @@ class DocumentRepositoryImpl implements DocumentRepository {
     this._parser,
     this._chunker,
     this._vectorStore,
+    this._geckoService,
   );
 
   @override
@@ -49,6 +59,14 @@ class DocumentRepositoryImpl implements DocumentRepository {
 
   @override
   Future<DocumentModel> importDocument(String filePath) async {
+    return importDocumentWithProgress(filePath);
+  }
+
+  @override
+  Future<DocumentModel> importDocumentWithProgress(
+    String filePath, {
+    void Function(String documentId, double progress)? onProgress,
+  }) async {
     final file = File(filePath);
     if (!await file.exists()) {
       throw DocumentParseException('File not found: $filePath');
@@ -67,6 +85,9 @@ class DocumentRepositoryImpl implements DocumentRepository {
     final mimeType = _detectMime(filePath);
     final fileSize = await file.length();
 
+    void progress(double p) => onProgress?.call(docId, p);
+    progress(0.05); // 5% - copied file
+
     try {
       // 1. Save document metadata
       await _db.documentsDao.insertDocument(DocumentsCompanion(
@@ -79,13 +100,21 @@ class DocumentRepositoryImpl implements DocumentRepository {
         createdAt: Value(DateTime.now()),
       ));
 
+      progress(0.1); // 10% - saved metadata
+
       // 2. Parse → rawText
       final rawText = await _parser.parse(destPath);
+      progress(0.2); // 20% - parsed
 
       // 3. Chunk text
       final chunks = _chunker.chunk(rawText);
+      progress(0.3); // 30% - chunked
 
-      // 4. Save chunks + vectors
+      if (chunks.isEmpty) {
+        throw const DocumentParseException('No text content found in document');
+      }
+
+      // 4. Create chunk entries
       final chunkEntries = <_ChunkEntry>[];
       for (int i = 0; i < chunks.length; i++) {
         final chunkId = _uuid.v4();
@@ -96,7 +125,7 @@ class DocumentRepositoryImpl implements DocumentRepository {
         ));
       }
 
-      // Insert chunks into database
+      // 5. Insert chunks into database
       final chunkCompanions = chunkEntries.map((e) {
         return ChunksCompanion(
           id: Value(e.id),
@@ -109,8 +138,45 @@ class DocumentRepositoryImpl implements DocumentRepository {
       }).toList();
       await _db.chunksDao.insertChunks(chunkCompanions);
 
-      // 5. Update chunk count
+      progress(0.4); // 40% - chunks saved
+
+      // 6. Embed chunks (only if Gecko service is ready)
+      if (_geckoService.isReady) {
+        final texts = chunkEntries.map((e) => e.text).toList();
+        final totalChunks = texts.length;
+
+        // Process in batches of 10 for progress reporting
+        const batchSize = 10;
+        final allVectors = <List<double>>[];
+
+        for (int i = 0; i < totalChunks; i += batchSize) {
+          final end = (i + batchSize > totalChunks) ? totalChunks : i + batchSize;
+          final batch = texts.sublist(i, end);
+          final vectors = await _geckoService.embedBatch(batch);
+          allVectors.addAll(vectors);
+
+          // Progress: 40% → 90% for embedding
+          final embedProgress = 0.4 + (0.5 * (end / totalChunks));
+          progress(embedProgress);
+        }
+
+        // 7. Store vectors
+        final vectorEntries = <VectorEntry>[];
+        for (int i = 0; i < chunkEntries.length; i++) {
+          vectorEntries.add(VectorEntry(
+            chunkId: chunkEntries[i].id,
+            embedding: allVectors[i],
+          ));
+        }
+        await _vectorStore.insertBatch(vectorEntries);
+
+        progress(0.95); // 95% - vectors stored
+      }
+
+      // 8. Update chunk count
       await _db.documentsDao.updateChunkCount(docId, chunks.length);
+
+      progress(1.0); // 100% - done
 
       // Return document model
       final row = await _db.documentsDao.getAllDocuments();
@@ -122,6 +188,7 @@ class DocumentRepositoryImpl implements DocumentRepository {
         await _db.documentsDao.deleteDocument(docId);
         await File(destPath).delete();
       } catch (_) {}
+      if (e is DocumentParseException) rethrow;
       if (e is AppException) rethrow;
       throw DocumentParseException('Import failed: $e');
     }
@@ -190,6 +257,21 @@ class DocumentRepositoryImpl implements DocumentRepository {
 
       await _db.chunksDao.insertChunks(chunkEntries);
       await _db.documentsDao.updateChunkCount(id, chunks.length);
+
+      // Re-embed if Gecko is ready
+      if (_geckoService.isReady) {
+        final texts = chunks;
+        final allVectors = await _geckoService.embedBatch(texts);
+        final vectorEntries = <VectorEntry>[];
+        final newChunks = await _db.chunksDao.getChunksByDocument(id);
+        for (int i = 0; i < newChunks.length && i < allVectors.length; i++) {
+          vectorEntries.add(VectorEntry(
+            chunkId: newChunks[i].id,
+            embedding: allVectors[i],
+          ));
+        }
+        await _vectorStore.insertBatch(vectorEntries);
+      }
     } catch (e) {
       throw StorageException('Reindex failed: $e');
     }

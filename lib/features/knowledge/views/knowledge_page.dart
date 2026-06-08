@@ -1,6 +1,6 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:file_picker/file_picker.dart';
 
 import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
@@ -40,6 +40,13 @@ class KnowledgeView extends StatelessWidget {
         builder: (context, state) {
           if (state is KnowledgeInitial || state is KnowledgeLoading) {
             return const Center(child: CircularProgressIndicator());
+          }
+
+          if (state is KnowledgeIndexing) {
+            return _IndexingProgressView(
+              documentName: state.documentName,
+              progress: state.progress,
+            );
           }
 
           if (state is KnowledgeError) {
@@ -125,6 +132,75 @@ class KnowledgeView extends StatelessWidget {
           .read<KnowledgeBloc>()
           .add(DocumentImportRequested(filePath));
     }
+  }
+}
+
+class _IndexingProgressView extends StatelessWidget {
+  final String documentName;
+  final double progress;
+
+  const _IndexingProgressView({
+    required this.documentName,
+    required this.progress,
+  });
+
+  String _progressLabel(double p) {
+    if (p < 0.1) return 'Đang copy file...';
+    if (p < 0.2) return 'Đang phân tích...';
+    if (p < 0.3) return 'Đang chia chunks...';
+    if (p < 0.4) return 'Đang lưu chunks...';
+    if (p < 0.9) return 'Đang embedding (${(p * 100).toInt()}%)...';
+    if (p < 1.0) return 'Đang lưu vectors...';
+    return 'Hoàn tất';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              Icons.library_books_outlined,
+              size: 48,
+              color: AppColors.primaryLight,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'Đang xử lý',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              documentName,
+              style: const TextStyle(
+                color: AppColors.subtleLight,
+                fontSize: 14,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 12,
+                backgroundColor: AppColors.backgroundLight,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              _progressLabel(progress),
+              style: const TextStyle(fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
