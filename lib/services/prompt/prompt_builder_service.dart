@@ -7,6 +7,7 @@ class BuiltContext {
   final List<MessageModel> history;
   final bool historyWasTrimmed;
   final int estimatedTokens;
+  final String? summary;
 
   const BuiltContext({
     required this.question,
@@ -14,6 +15,7 @@ class BuiltContext {
     required this.history,
     required this.historyWasTrimmed,
     required this.estimatedTokens,
+    this.summary,
   });
 }
 
@@ -37,6 +39,11 @@ class PromptBuilderServiceImpl implements PromptBuilderService {
       for (int i = 0; i < context.relevantChunks.length; i++) {
         buffer.writeln('[${i + 1}] ${context.relevantChunks[i].chunkText}');
       }
+    }
+
+    if (context.summary != null && context.summary!.isNotEmpty) {
+      buffer.writeln('\nConversation summary (condensed history):');
+      buffer.writeln(context.summary);
     }
 
     buffer.writeln('<end_of_turn>');

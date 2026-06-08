@@ -4,12 +4,14 @@ import 'package:offline_chat/features/chat/bloc/chat_bloc.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/features/knowledge/bloc/knowledge_bloc.dart';
 import 'package:offline_chat/features/knowledge/repositories/document_repository.dart';
+import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
 import 'package:offline_chat/services/context/context_manager_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
+import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
@@ -22,6 +24,7 @@ Future<void> setupLocator() async {
   sl.registerLazySingleton<AppDatabase>(() => database);
 
   // Services
+  sl.registerLazySingleton<ModelManagerService>(() => ModelManagerServiceImpl());
   sl.registerLazySingleton<GemmaService>(() => GemmaServiceImpl());
   sl.registerLazySingleton<GeckoService>(() => GeckoServiceImpl());
   sl.registerLazySingleton<PromptBuilderService>(() => PromptBuilderServiceImpl());
@@ -48,9 +51,9 @@ Future<void> setupLocator() async {
     ),
   );
 
-  // Context Manager (depends on MessageRepository)
+  // Context Manager (depends on MessageRepository + GemmaService cho summary)
   sl.registerLazySingleton<ContextManagerService>(
-    () => ContextManagerService(sl<MessageRepository>()),
+    () => ContextManagerService(sl<MessageRepository>(), sl<GemmaService>()),
   );
 
   // Blocs
@@ -72,5 +75,9 @@ Future<void> setupLocator() async {
 
   sl.registerLazySingleton<KnowledgeBloc>(
     () => KnowledgeBloc(sl<DocumentRepository>()),
+  );
+
+  sl.registerLazySingleton<ModelBloc>(
+    () => ModelBloc(modelManager: sl<ModelManagerService>()),
   );
 }
