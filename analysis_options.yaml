@@ -1,0 +1,11 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    - always_use_package_imports
+    - avoid_print
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - sort_pub_dependencies
+    - unawaited_futures
+    - use_super_parameters
