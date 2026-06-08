@@ -9,11 +9,14 @@ import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
 import 'package:offline_chat/services/context/context_manager_service.dart';
+import 'package:offline_chat/services/export/export_session_service.dart';
+import 'package:offline_chat/services/gecko/gecko_retry_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
+import 'package:offline_chat/services/vectorstore/semantic_cache_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 final sl = GetIt.instance;
@@ -26,7 +29,12 @@ Future<void> setupLocator() async {
   // Services
   sl.registerLazySingleton<ModelManagerService>(() => ModelManagerServiceImpl());
   sl.registerLazySingleton<GemmaService>(() => GemmaServiceImpl());
-  sl.registerLazySingleton<GeckoService>(() => GeckoServiceImpl());
+  final geckoService = GeckoServiceImpl();
+  sl.registerLazySingleton<GeckoService>(() => GeckoRetryService(geckoService));
+  sl.registerLazySingleton<SemanticCacheService>(
+      () => SemanticCacheServiceImpl());
+  sl.registerLazySingleton<ExportSessionService>(
+      () => ExportSessionServiceImpl());
   sl.registerLazySingleton<PromptBuilderService>(() => PromptBuilderServiceImpl());
   sl.registerLazySingleton<ChunkingService>(() => ChunkingServiceImpl());
   sl.registerLazySingleton<DocumentParserService>(() => DocumentParserServiceImpl());

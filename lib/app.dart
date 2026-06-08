@@ -6,6 +6,11 @@ import 'package:offline_chat/features/model_manager/views/model_manager_page.dar
 import 'package:offline_chat/features/session/views/session_list_page.dart';
 import 'package:offline_chat/features/settings/views/settings_page.dart';
 
+/// Global notifier for theme mode (light/dark).
+/// Can be toggled from SettingsPage.
+final ValueNotifier<ThemeMode> themeModeNotifier =
+    ValueNotifier(ThemeMode.light);
+
 class App extends StatelessWidget {
   App({super.key});
 
@@ -45,14 +50,30 @@ class App extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp.router(
-      title: 'Offline Chat',
-      debugShowCheckedModeBanner: false,
-      routerConfig: _router,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8)),
-        useMaterial3: true,
-      ),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (context, mode, _) {
+        return MaterialApp.router(
+          title: 'Offline Chat',
+          debugShowCheckedModeBanner: false,
+          routerConfig: _router,
+          themeMode: mode,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF1A73E8),
+              brightness: Brightness.light,
+            ),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF1A73E8),
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+          ),
+        );
+      },
     );
   }
 }

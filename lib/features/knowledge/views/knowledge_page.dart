@@ -117,7 +117,7 @@ class KnowledgeView extends StatelessWidget {
   }
 
   Future<void> _pickAndImportFile(BuildContext context) async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['pdf', 'docx', 'txt', 'md'],
     );
