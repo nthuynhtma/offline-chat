@@ -22,7 +22,9 @@ part 'daos/vectors_dao.dart';
   daos: [SessionsDao, MessagesDao, DocumentsDao, ChunksDao, VectorsDao],
 )
 class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(_openConnection());
+  /// [queryExecutor] có thể được cung cấp để test (in-memory database)
+  AppDatabase({QueryExecutor? queryExecutor})
+      : super(queryExecutor ?? _openConnection());
 
   @override
   int get schemaVersion => 1;

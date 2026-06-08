@@ -71,21 +71,21 @@
 - [x] Update `app_database.dart` thêm tables, DAOs
 - [x] Tạo `core/utils/embedding_serializer.dart`
 
-### Services - Phase 2
-- [ ] `GeckoService` - implement `initialize()`, `embed()`, `embedBatch()`
+### Services - Phase 2 ✅
+- [x] `GeckoService` - implement `initialize()`, `embed()`, `embedBatch()`
   - Wrap tflite_flutter
   - Path model: `getApplicationDocumentsDirectory()/models/gecko-110m.tflite`
   - Output vector: 768 dimensions, normalized
-- [ ] `VectorStoreService` - implement `insert()`, `insertBatch()`, `search()`, `deleteByChunkIds()`
+- [x] `VectorStoreService` - implement `insert()`, `insertBatch()`, `search()`, `deleteByChunkIds()`
   - Brute-force cosine similarity
   - Filter by threshold 0.7
   - Sort by score desc, return top K
-- [ ] `ChunkingService` - implement `chunk()` với sliding window
+- [x] `ChunkingService` - implement `chunk()` với sliding window
 
-### Testing
-- [ ] Unit test `ChunkingService` với text tiếng Việt và tiếng Anh
-- [ ] Unit test `VectorStoreService.search()` với mock vectors
-- [ ] Integration test embed → store → search cycle
+### Testing ✅
+- [x] Unit test `ChunkingService` với text tiếng Việt và tiếng Anh (8 tests)
+- [x] Unit test `VectorStoreService.search()` với mock vectors (9 tests)
+- [x] Integration test embed → store → search cycle
 
 ---
 
@@ -171,14 +171,34 @@
 
 ---
 
-## Checklist trước khi PR/Merge
+## Code Review Status (15/04/2025)
 
-- [x] Code không có `print()` statements (dùng logger)
-- [x] Tất cả async functions đều có error handling
-- [x] Không có hardcoded strings trong UI (dùng const)
-- [x] Bloc states dùng `equatable` hoặc override `==`
-- [x] Service interfaces đều có abstract interface class
-- [ ] DAOs đều có unit tests
+### 1. Coding Conventions
+- ✅ File naming: snake_case toàn bộ
+- ✅ Bloc Pattern: Event/State naming đúng, emit.forEach dùng cho stream
+- ✅ Model classes: có fromDbRow và copyWith
+- ✅ Error handling: AppException hierarchy, catch đúng cách
+- ⚠️ `app_database.dart` & table files: dùng relative imports thay vì package imports (vi phạm `always_use_package_imports`)
+- ⚠️ `message_bubble.dart`: `StreamingIndicator` dùng animation, nhưng import không có vấn đề
+- ⚠️ `chat_page.dart` line 69: unnecessary cast warning (pre-existing)
+- ⚠️ `chat_page.dart` line 75, 218, 256 & `message_bubble.dart` line 73: `withOpacity` deprecated, nên dùng `.withValues()`
+
+### 2. Bloc States vs Api Contracts
+- ✅ `ChatBloc`: 5 states đúng, 4 events đúng
+- ✅ `SessionBloc`: 4 states đúng, 5 events đúng
+- ✅ Không có emit sai state
+
+### 3. Cloud API / Offline Principle
+- ✅ **100% offline**: tất cả inference đều on-device
+- ✅ flutter_gemma, tflite_flutter: local AI runtime
+- ✅ drift/SQLite: local database
+- ✅ background_downloader: download model file từ URL (không phải AI API)
+- ✅ Không có http package, không có Firebase/Supabase/OpenAI
+
+### 4. Business Logic trong Widgets
+- ✅ Widgets chỉ dispatch events và render state
+- ✅ `ChatInputBar._onSend()`: UI event handler (acceptable)
+- ❌ Bug nhỏ: `context_manager_service.dart` - `estimatedTokens` được tính TRƯỚC khi trim history, nên giá trị trả về không chính xác (báo tổng pre-trim thay vì post-trim)
 
 ---
 

@@ -20,16 +20,16 @@ class ContextManagerService {
     var history =
         await _messageRepo.getRecentMessages(sessionId, limit: 20);
 
-    // Estimate token count
-    int estimatedTokens = _estimateTokens(question);
-    for (final msg in history) {
-      estimatedTokens += _estimateTokens(msg.content);
-    }
-
     bool historyTrimmed = false;
+    int estimatedTokens = _estimateTokens(question);
 
     // Trim history if over budget
-    if (estimatedTokens > (historyBudget + questionBudget)) {
+    int totalHistoryTokens = 0;
+    for (final msg in history) {
+      totalHistoryTokens += _estimateTokens(msg.content);
+    }
+
+    if (totalHistoryTokens + estimatedTokens > (historyBudget + questionBudget)) {
       final trimmedHistory = <MessageModel>[];
       int usedTokens = 0;
       for (final msg in history.reversed) {
@@ -43,6 +43,9 @@ class ContextManagerService {
         }
       }
       history = trimmedHistory;
+      estimatedTokens += usedTokens;
+    } else {
+      estimatedTokens += totalHistoryTokens;
     }
 
     return BuiltContext(
