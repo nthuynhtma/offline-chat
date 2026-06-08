@@ -29,6 +29,11 @@ class SessionListView extends StatelessWidget {
         title: const Text('Offline Chat'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.library_books_outlined),
+            onPressed: () => context.push('/knowledge'),
+            tooltip: 'Knowledge Base',
+          ),
+          IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
           ),

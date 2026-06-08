@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:offline_chat/features/chat/views/chat_page.dart';
+import 'package:offline_chat/features/knowledge/views/knowledge_page.dart';
 import 'package:offline_chat/features/session/views/session_list_page.dart';
 
 class App extends StatelessWidget {
@@ -21,6 +22,11 @@ class App extends StatelessWidget {
           final sessionId = state.pathParameters['sessionId']!;
           return ChatPage(sessionId: sessionId);
         },
+      ),
+      GoRoute(
+        path: '/knowledge',
+        name: 'knowledge',
+        builder: (context, state) => const KnowledgePage(),
       ),
       GoRoute(
         path: '/settings',
