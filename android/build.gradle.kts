@@ -15,8 +15,16 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
+
 subprojects {
     project.evaluationDependsOn(":app")
+
+    // Force Kotlin plugin application for plugins that skip it when AGP >= 9
+    plugins.withId("com.android.library") {
+        if (!project.plugins.hasPlugin("org.jetbrains.kotlin.android")) {
+            project.plugins.apply("org.jetbrains.kotlin.android")
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {
