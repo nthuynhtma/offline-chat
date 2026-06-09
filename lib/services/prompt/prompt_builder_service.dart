@@ -33,15 +33,43 @@ class PromptBuilderServiceImpl implements PromptBuilderService {
 
     // System turn
     buffer.writeln('<start_of_turn>system');
-    buffer.writeln(
-        'You are a helpful AI assistant. Answer clearly and concisely.');
-    buffer.writeln('Answer in the same language as the user\'s question.');
+    buffer.writeln('''
+    You are AgriAI, an agricultural assistant running completely offline on a mobile device.
+
+    Your primary purpose is to help users with:
+    - Crop cultivation and management
+    - Soil health and fertilization
+    - Pest and disease identification
+    - Irrigation and water management
+    - Livestock and poultry farming
+    - Agricultural best practices
+    - Sustainable farming techniques
+
+    Instructions:
+    - Answer in the same language as the user.
+    - Provide practical, clear, and actionable agricultural advice.
+    - Prefer information from the provided document context when available.
+    - If document context contains the answer, prioritize it over general knowledge.
+    - If document context does not contain the answer, use your general agricultural knowledge.
+    - If you are uncertain, clearly state your uncertainty instead of guessing.
+    - Keep answers concise unless the user asks for more detail.
+    - Explain agricultural terms in simple language.
+    - Do not claim to have internet access, real-time data, weather data, or external services.
+    - Remember that you operate completely offline on the user's mobile device.
+    ''');
 
     if (context.relevantChunks.isNotEmpty) {
-      buffer.writeln('\nRelevant context from documents:');
+      buffer.writeln('\nDocument Context (Highest Priority):');
+      buffer.writeln('The following information comes from the user\'s agricultural documents.');
+      buffer.writeln('Use this information as the primary source when answering.');
+      buffer.writeln('If the answer can be found in the document context, do not ignore it.');
+      buffer.writeln('If the document context is insufficient, then use your general agricultural knowledge.');
+
       log_util.log.d('🔨 [PromptBuilder] Thêm ${context.relevantChunks.length} chunks vào prompt');
+
       for (int i = 0; i < context.relevantChunks.length; i++) {
-        buffer.writeln('[${i + 1}] ${context.relevantChunks[i].chunkText}');
+        buffer.writeln('\n[Document ${i + 1}]');
+        buffer.writeln(context.relevantChunks[i].chunkText);
       }
     } else {
       log_util.log.d('🔨 [PromptBuilder] Không có relevant chunks — bỏ qua RAG context');
@@ -58,8 +86,16 @@ class PromptBuilderServiceImpl implements PromptBuilderService {
     buffer.writeln('<end_of_turn>');
 
     // History turns
-    log_util.log.d('🔨 [PromptBuilder] Thêm ${context.history.length} history turns vào prompt');
-    for (final msg in context.history) {
+    // Bỏ qua message cuối cùng trong history nếu nó trùng với context.question
+    // (vì message này sẽ được thêm riêng ở bước "Current question" bên dưới)
+    final historyToInclude = (context.history.isNotEmpty &&
+            context.history.last.role.name == 'user' &&
+            context.history.last.content == context.question)
+        ? context.history.sublist(0, context.history.length - 1)
+        : context.history;
+
+    log_util.log.d('🔨 [PromptBuilder] Thêm ${historyToInclude.length} history turns vào prompt (bỏ qua ${context.history.length - historyToInclude.length} message cuối trùng với question)');
+    for (final msg in historyToInclude) {
       buffer.writeln('<start_of_turn>${msg.role.name}');
       buffer.writeln(msg.content);
       buffer.writeln('<end_of_turn>');

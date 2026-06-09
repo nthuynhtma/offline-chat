@@ -51,7 +51,7 @@ dependencies:
   # IDs
   uuid: ^4.4.0
   logger: ^2.7.0
-
+  scrollview_observer: ^1.27.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -10,6 +10,7 @@ import 'package:offline_chat/features/chat/views/message_bubble.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/injection/service_locator.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
+import 'package:scrollview_observer/scrollview_observer.dart';
 
 class ChatPage extends StatelessWidget {
   final String sessionId;
@@ -205,17 +206,18 @@ class _ClearButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<ChatBloc, ChatState>(
       buildWhen: (prev, curr) =>
-          (prev is ChatStreaming) != (curr is ChatStreaming),
+          (prev is ChatStreaming) != (curr is ChatStreaming) ||
+          (prev is ChatThinking) != (curr is ChatThinking),
       builder: (context, state) {
-        final isStreaming = state is ChatStreaming;
+        final isBusy = state is ChatStreaming || state is ChatThinking;
         return IconButton(
           icon: Icon(
             Icons.delete_outline,
-            color: isStreaming
+            color: isBusy
                 ? AppColors.subtleLight.withOpacity(0.4)
                 : null,
           ),
-          onPressed: isStreaming
+          onPressed: isBusy
               ? null
               : () => showDialog(
                     context: context,
@@ -257,9 +259,10 @@ class _ChatBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<ChatBloc, ChatState>(
       buildWhen: (prev, curr) {
-        // Chỉ rebuild khi state type thay đổi (Loading → Loaded → Streaming → Error)
+        // Chỉ rebuild khi state type thay đổi
         // KHÔNG rebuild khi streamingText thay đổi (đã xử lý riêng trong _MessageList)
         if (curr is ChatStreaming && prev is ChatStreaming) return false;
+        if (curr is ChatThinking && prev is ChatThinking) return false;
         return true;
       },
       builder: (context, state) {
@@ -297,6 +300,7 @@ class _ChatBody extends StatelessWidget {
                 child: _MessageList(
                   messages: state.messages,
                   sessionId: sessionId,
+                  showThinkingIndicator: false,
                 ),
               ),
             ],
@@ -305,10 +309,16 @@ class _ChatBody extends StatelessWidget {
 
         // Extract messages from state
         List<MessageModel> messages = [];
+        bool showThinking = false;
         if (state is ChatLoaded) {
           messages = state.messages;
+          showThinking = false;
+        } else if (state is ChatThinking) {
+          messages = state.messages;
+          showThinking = true;
         } else if (state is ChatStreaming) {
           messages = state.messages;
+          showThinking = false;
         }
 
         // Empty state
@@ -329,65 +339,206 @@ class _ChatBody extends StatelessWidget {
           );
         }
 
-        // Messages with optional streaming bubble
+        // Messages with optional streaming/thinking bubble
         return _MessageList(
           messages: messages,
           sessionId: sessionId,
+          showThinkingIndicator: showThinking,
         );
       },
     );
   }
 }
 
-/// Danh sách tin nhắn + streaming bubble.
-/// Dùng BlocBuilder riêng cho streaming text để chỉ rebuild bubble cuối.
-class _MessageList extends StatelessWidget {
+/// Danh sách tin nhắn + streaming/thinking bubble + auto-scroll.
+/// Dùng ListView.builder + scrollview_observer để scroll mượt và phát hiện vị trí.
+class _MessageList extends StatefulWidget {
   final List<MessageModel> messages;
   final String sessionId;
+  final bool showThinkingIndicator;
 
   const _MessageList({
     required this.messages,
     required this.sessionId,
+    this.showThinkingIndicator = false,
   });
 
   @override
+  State<_MessageList> createState() => _MessageListState();
+}
+
+class _MessageListState extends State<_MessageList> {
+  final ScrollController _scrollController = ScrollController();
+
+  /// true nếu user đang ở sát cuối danh sách (cho phép auto-scroll).
+  bool _isNearBottom = true;
+
+  @override
+  void didUpdateWidget(covariant _MessageList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // Auto-scroll xuống cuối khi user đang ở cuối và có message mới / streaming
+    if (_isNearBottom && _scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-      padding:
-          const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.md),
-      itemCount: messages.length + 1, // +1 cho streaming bubble
-      itemBuilder: (context, index) {
-        if (index == messages.length) {
-          // Streaming bubble — rebuild riêng khi streamingText thay đổi
-          return _StreamingBubble(sessionId: sessionId);
-        }
-        return MessageBubble(message: messages[index]);
-      },
+    return Stack(
+      children: [
+        ListViewObserver(
+          controller: ListObserverController(controller: _scrollController),
+          onObserve: (result) {
+            if (!mounted) return;
+            // Kiểm tra item cuối (messages.length = index của bubble cuối)
+            final lastIndex = widget.messages.length;
+            final visibleList = result.displayingChildModelList;
+            final isLastVisible = visibleList.any((model) =>
+                model.index == lastIndex);
+            if (_isNearBottom != isLastVisible) {
+              setState(() {
+                _isNearBottom = isLastVisible;
+              });
+            }
+          },
+          child: ListView.builder(
+            controller: _scrollController,
+            padding:
+                const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.sm),
+            itemCount: widget.messages.length + 1, // +1 cho streaming/thinking bubble
+            itemBuilder: (context, index) {
+              if (index == widget.messages.length) {
+                // Streaming/thinking bubble — rebuild riêng
+                return _LastBubble(sessionId: widget.sessionId);
+              }
+              return MessageBubble(message: widget.messages[index]);
+            },
+          ),
+        ),
+
+        // Nút "⬇ Mới nhất" — chỉ hiển thị khi user không ở cuối
+        _ScrollToBottomButton(
+          isVisible: !_isNearBottom,
+          onTap: () {
+            if (_scrollController.hasClients) {
+              _scrollController.animateTo(
+                _scrollController.position.maxScrollExtent,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut,
+              );
+            }
+          },
+        ),
+      ],
     );
   }
 }
 
-/// Bubble hiển thị text đang stream.
-/// Dùng BlocBuilder chỉ rebuild khi streamingText thay đổi.
-class _StreamingBubble extends StatelessWidget {
+/// Nút nổi "⬇ Mới nhất" ở góc dưới phải.
+class _ScrollToBottomButton extends StatelessWidget {
+  final bool isVisible;
+  final VoidCallback onTap;
+
+  const _ScrollToBottomButton({
+    required this.isVisible,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: isVisible ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 200),
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          child: AnimatedSlide(
+            offset: isVisible ? Offset.zero : const Offset(0, 2),
+            duration: const Duration(milliseconds: 200),
+            child: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(20),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: isVisible ? onTap : null,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.md,
+                    vertical: AppSpacing.xs,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 20,
+                        color: AppColors.primaryLight,
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        'Mới nhất',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: AppColors.primaryLight,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bubble cuối cùng: hiển thị thinking indicator (3 chấm) hoặc text đang stream.
+/// Dùng BlocBuilder chỉ rebuild khi cần.
+class _LastBubble extends StatelessWidget {
   final String sessionId;
-  const _StreamingBubble({required this.sessionId});
+  const _LastBubble({required this.sessionId});
 
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<ChatBloc, ChatState>(
       buildWhen: (prev, curr) {
-        // Chỉ rebuild khi streamingText thay đổi
+        // Rebuild khi streamingText thay đổi
         if (prev is ChatStreaming && curr is ChatStreaming) {
           return prev.streamingText != curr.streamingText;
         }
-        // Rebuild khi bắt đầu stream (Loaded → Streaming)
+        // Rebuild khi chuyển từ Thinking → Streaming (giữ bubble, đổi nội dung)
+        if (curr is ChatStreaming && prev is ChatThinking) return true;
+        // Rebuild khi bắt đầu Thinking
+        if (curr is ChatThinking && prev is! ChatThinking) return true;
+        // Rebuild khi bắt đầu stream (Loaded/Thinking → Streaming)
         if (curr is ChatStreaming && prev is! ChatStreaming) return true;
         // Rebuild khi kết thúc stream (Streaming → Loaded)
         if (curr is! ChatStreaming && prev is ChatStreaming) return true;
         return false;
       },
       builder: (context, state) {
+        if (state is ChatThinking) {
+          return _ThinkingBubble(sessionId: sessionId);
+        }
         if (state is ChatStreaming) {
           return MessageBubble(
             message: MessageModel(
@@ -400,9 +551,99 @@ class _StreamingBubble extends StatelessWidget {
             isStreaming: true,
           );
         }
-        // Stream đã kết thúc → hiển thị empty (đã có MessageBubble thật từ messages)
+        // Stream/Thinking đã kết thúc → hiển thị empty (đã có MessageBubble thật từ messages)
         return const SizedBox.shrink();
       },
+    );
+  }
+}
+
+/// Bubble "AI đang suy nghĩ..." với 3 chấm animation.
+class _ThinkingBubble extends StatefulWidget {
+  final String sessionId;
+  const _ThinkingBubble({required this.sessionId});
+
+  @override
+  State<_ThinkingBubble> createState() => _ThinkingBubbleState();
+}
+
+class _ThinkingBubbleState extends State<_ThinkingBubble>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+
+  @override
+  void initState() {
+    super.initState();
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.xs,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Avatar AI
+          CircleAvatar(
+            radius: 16,
+            backgroundColor: AppColors.primaryLight.withOpacity(0.1),
+            child: const Icon(Icons.agriculture, size: 18, color: AppColors.primaryLight),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          // Bubble với 3 chấm
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.md,
+                vertical: AppSpacing.sm,
+              ),
+              decoration: BoxDecoration(
+                color: AppColors.backgroundLight,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: AnimatedBuilder(
+                animation: _animationController,
+                builder: (context, child) {
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(3, (index) {
+                      final delay = index * 0.2;
+                      final t = (_animationController.value - delay)
+                          .clamp(0.0, 1.0);
+                      final scale = (t < 0.5)
+                          ? (t / 0.5) * 0.5 + 0.5   // 0.5 → 1.0
+                          : (1.0 - (t - 0.5) / 0.5) * 0.5 + 0.5; // 1.0 → 0.5
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: Transform.scale(
+                          scale: scale,
+                          child: const CircleAvatar(
+                            radius: 4,
+                            backgroundColor: AppColors.subtleLight,
+                          ),
+                        ),
+                      );
+                    }),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -78,6 +78,14 @@ class ChatLoaded extends ChatState {
   List<Object?> get props => [messages];
 }
 
+class ChatThinking extends ChatState {
+  final List<MessageModel> messages;
+  const ChatThinking(this.messages);
+
+  @override
+  List<Object?> get props => [messages];
+}
+
 class ChatStreaming extends ChatState {
   final List<MessageModel> messages;
   final String streamingText;
@@ -268,7 +276,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         userMsg,
       ];
       _currentMessages = currentMessages;
-      emit(ChatLoaded(currentMessages));
+      emit(ChatThinking(currentMessages));
 
       // 2. RAG retrieval
       List<SearchResult> ragResults = [];
