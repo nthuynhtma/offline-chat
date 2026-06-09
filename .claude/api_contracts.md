@@ -33,18 +33,28 @@ abstract interface class GemmaService {
 ### GeckoService
 
 ```dart
+/// Sử dụng flutter_gemma EmbeddingModel API (KHÔNG dùng tflite_flutter Interpreter).
+/// flutter_gemma tự quản lý tokenizer (SentencePiece) + inference + normalization.
 abstract interface class GeckoService {
-  /// Load Gecko TFLite model
-  Future<void> initialize(String modelPath);
+  /// Đăng ký model + tokenizer với flutter_gemma qua installEmbedder().
+  /// Gọi 1 lần sau khi cả 2 file đã được download xuống disk.
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  });
+
+  /// Initialize embedding model lấy từ FlutterGemma.getActiveEmbedder().
+  /// Không cần path — flutter_gemma tự quản lý.
+  Future<void> initialize();
 
   bool get isReady;
 
   Future<void> dispose();
 
-  /// Embed một đoạn text → vector 768 chiều
+  /// Embed một đoạn text → vector (query mode, TaskType.retrievalQuery)
   Future<List<double>> embed(String text);
 
-  /// Embed nhiều đoạn cùng lúc (batch)
+  /// Embed nhiều đoạn cùng lúc (batch, document mode TaskType.retrievalDocument)
   Future<List<List<double>>> embedBatch(List<String> texts);
 }
 ```
@@ -301,17 +311,15 @@ States:
 
 ```
 Events:
-  ModelStatusChecked()
-  GemmaDownloadStarted()
-  GeckoDownloadStarted()
-  DownloadCancelled()
+  StatusChecked()                        → kiểm tra trạng thái model files
+  GemmaDownloadStarted()                 → bắt đầu download Gemma
+  GeckoDownloadStarted()                 → bắt đầu download Gecko + tokenizer
+  DownloadCancelled(fileName)            → huỷ download 1 file
 
 States:
   ModelInitial
-  ModelChecking
-  ModelReady(gemmaVersion: String, geckoVersion: String)
-  ModelNotReady(gemmaAvailable: bool, geckoAvailable: bool)
-  ModelDownloading(modelName: String, progress: double, bytesDownloaded: int, totalBytes: int)
+  ModelLoading
+  ModelLoaded(gemmaInfo, geckoInfo, gemmaReady: bool, geckoReady: bool)
   ModelError(message: String)
 ```
 
@@ -372,156 +380,66 @@ class ChunkModel {
 // pubspec.yaml
 // background_downloader: ^9.4.0
 
+/// ModelInfo: data class chứa trạng thái của 1 model file.
+/// Dùng cho cả Gemma, Gecko model và Gecko tokenizer.
+class ModelInfo {
+  final String name;              // tên hiển thị
+  final String fileName;          // tên file trên disk
+  final String downloadUrl;       // URL download
+  final int fileSizeBytes;        // kích thước mong đợi
+  final String? checksumSha256;
+  final ModelStatus status;       // notDownloaded | downloading | downloaded | error
+  final double progress;          // 0.0 - 1.0
+  final String? errorMessage;
+}
+
 abstract interface class ModelManagerService {
-  /// Khởi tạo FileDownloader, config notification
+  /// Lấy thông tin model Gemma
+  ModelInfo get gemmaInfo;
+
+  /// Lấy thông tin model Gecko
+  ModelInfo get geckoInfo;
+
+  /// Stream cập nhật progress download (broadcast, replay state cuối khi subscribe)
+  Stream<ModelInfo> get progressStream;
+
+  /// Khởi tạo FileDownloader, config notification, kiểm tra file có sẵn
   Future<void> initialize();
 
-  /// Check xem model file đã tồn tại và hợp lệ chưa
-  Future<ModelFileStatus> checkStatus(ModelType model);
+  /// Bắt đầu download Gemma model (no-op nếu đang chạy)
+  Future<void> downloadGemma();
 
-  /// Bắt đầu download (background, resume-capable)
-  /// Trả về Stream để theo dõi progress
-  Stream<DownloadProgressEvent> download(ModelType model);
+  /// Bắt đầu download Gecko model (no-op nếu đang chạy)
+  Future<void> downloadGecko();
 
-  /// Pause download đang chạy
-  Future<void> pause(ModelType model);
+  /// Bắt đầu download tokenizer SentencePiece cho Gecko
+  Future<void> downloadGeckoTokenizer();
 
-  /// Resume download đã pause
-  Future<void> resume(ModelType model);
+  /// Huỷ download của đúng file được chỉ định
+  Future<void> cancelDownload(String fileName);
 
-  /// Cancel và xóa partial file
-  Future<void> cancel(ModelType model);
+  /// Kiểm tra file đã tồn tại và kích thước hợp lệ không
+  Future<bool> isModelFileValid(String fileName);
 
-  /// Xóa model file đã download
-  Future<void> delete(ModelType model);
-}
+  /// Đường dẫn đầy đủ tới model file trên disk
+  Future<String> getModelPath(String fileName);
 
-enum ModelType { gemma, gecko }
-
-class ModelFileStatus {
-  final ModelType model;
-  final bool exists;
-  final bool checksumValid;
-  final int? fileSizeBytes;
-  const ModelFileStatus({
-    required this.model,
-    required this.exists,
-    required this.checksumValid,
-    this.fileSizeBytes,
-  });
-}
-
-class DownloadProgressEvent {
-  final ModelType model;
-  final double progress;        // 0.0 - 1.0
-  final int bytesDownloaded;
-  final int totalBytes;
-  final DownloadStatus status;  // running | paused | complete | failed
-  final String? error;
-  const DownloadProgressEvent({
-    required this.model,
-    required this.progress,
-    required this.bytesDownloaded,
-    required this.totalBytes,
-    required this.status,
-    this.error,
-  });
-}
-
-enum DownloadStatus { running, paused, complete, failed, cancelled }
-```
-
-### Implementation quan trọng
-
-```dart
-class ModelManagerServiceImpl implements ModelManagerService {
-  static const _gemmaUrl = 'YOUR_GEMMA_DOWNLOAD_URL'; // Hugging Face hoặc CDN
-  static const _geckoUrl = 'YOUR_GECKO_DOWNLOAD_URL';
-
-  @override
-  Future<void> initialize() async {
-    // KHÔNG cần flutter_local_notifications — background_downloader có
-    // built-in notification system, không cần package nào thêm.
-    //
-    // Config notification hiện lên khi app background:
-    FileDownloader().configureNotification(
-      running: const TaskNotification(
-        'Đang tải model AI',
-        'Tiến trình: {progress}%',
-      ),
-      paused: const TaskNotification('Tạm dừng', 'Nhấn để tiếp tục'),
-      complete: const TaskNotification('Hoàn thành', 'Model đã sẵn sàng'),
-      error: const TaskNotification('Lỗi', 'Không thể tải model'),
-      tapOpensFile: false,
-    );
-    // Gọi start() để kích hoạt persistent database và đảm bảo
-    // task tiếp tục sau khi app bị kill/suspend
-    await FileDownloader().start();
-  }
-
-  @override
-  Stream<DownloadProgressEvent> download(ModelType model) async* {
-    final controller = StreamController<DownloadProgressEvent>();
-    final url = model == ModelType.gemma ? _gemmaUrl : _geckoUrl;
-    final filename = model == ModelType.gemma
-        ? 'gemma4b-it.litertlm'
-        : 'gecko-110m.tflite';
-
-    final task = DownloadTask(
-      url: url,
-      filename: filename,
-      directory: 'models',
-      baseDirectory: BaseDirectory.applicationDocuments,
-      updates: Updates.statusAndProgress,
-      allowPause: true,   // ← QUAN TRỌNG: giải quyết Android 9-min limit
-                          // khi timeout, task tự pause rồi tự resume
-      retries: 3,
-      requiresWiFi: false,
-      // Android 14+: priority 0 → dùng UIDT service, không bị 9-min limit
-      // priority: 0,  // bỏ comment nếu muốn target Android 14+ specifically
-    );
-
-    await FileDownloader().download(
-      task,
-      onProgress: (progress) {
-        controller.add(DownloadProgressEvent(
-          model: model,
-          progress: progress,
-          bytesDownloaded: (progress * _totalBytes(model)).toInt(),
-          totalBytes: _totalBytes(model),
-          status: DownloadStatus.running,
-        ));
-      },
-      onStatus: (status) {
-        if (status == TaskStatus.complete) {
-          controller.add(DownloadProgressEvent(
-            model: model, progress: 1.0,
-            bytesDownloaded: _totalBytes(model),
-            totalBytes: _totalBytes(model),
-            status: DownloadStatus.complete,
-          ));
-          controller.close();
-        } else if (status == TaskStatus.failed) {
-          controller.addError('Download failed');
-          controller.close();
-        } else if (status == TaskStatus.paused) {
-          controller.add(DownloadProgressEvent(
-            model: model, progress: -1,
-            bytesDownloaded: 0, totalBytes: _totalBytes(model),
-            status: DownloadStatus.paused,
-          ));
-        }
-      },
-    );
-
-    yield* controller.stream;
-  }
-
-  int _totalBytes(ModelType model) => model == ModelType.gemma
-      ? 2_800_000_000  // ~2.8GB
-      : 440_000_000;   // ~440MB
+  /// Giải phóng resource
+  void dispose();
 }
 ```
+
+### Implementation (ModelManagerServiceImpl)
+
+Triển khai trong `lib/services/model_manager/model_manager_service.dart`. Dùng `background_downloader` (FileDownloader) để download:
+- **allowPause: true** — giải quyết Android 9-min WorkManager limit
+- **Broadcast StreamController** — cho phép nhiều listener subscribe
+- **Cache state cuối** — replay cho subscriber mới (tương tự BehaviorSubject)
+- **taskId = fileName** — để background_downloader nhận diện và resume đúng task
+- **Tolerance 5MB** — khi verify file size sau download
+- **downloadGeckoTokenizer()** — download SentencePiece model (~4MB) cho Gecko
+
+Xem code thực tế tại `lib/services/model_manager/model_manager_service.dart`.
 
 ### pubspec.yaml cần thêm
 

@@ -3,7 +3,6 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
-import 'package:offline_chat/injection/service_locator.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 
 class ModelManagerPage extends StatelessWidget {
@@ -11,13 +10,7 @@ class ModelManagerPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider(
-    // Dùng singleton từ sl thay vì tạo instance mới —
-    // đảm bảo cùng ModelBloc đã inject GemmaService/GeckoService
-    // và có thể gọi initialize() sau khi download xong.
-    create: (_) => sl<ModelBloc>()..add(const StatusChecked()),
-    child: const _ModelManagerView(),
-  );
+    return const _ModelManagerView();
   }
 }
 

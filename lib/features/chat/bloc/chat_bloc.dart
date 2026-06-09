@@ -142,6 +142,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     SessionInitialized event,
     Emitter<ChatState> emit,
   ) async {
+    if (isClosed) return;
     _currentSessionId = event.sessionId;
     emit(const ChatLoading());
     try {
@@ -157,6 +158,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     SendMessageRequested event,
     Emitter<ChatState> emit,
   ) async {
+    if (isClosed) return;
     if (_currentSessionId == null) return;
 
     // FIX #11: Block send nếu đang streaming để tránh race condition
@@ -277,6 +279,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     StreamingCancelled event,
     Emitter<ChatState> emit,
   ) async {
+    if (isClosed) return;
     if (state is! ChatStreaming) return;
 
     final streamingState = state as ChatStreaming;
@@ -314,6 +317,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     MessagesCleared event,
     Emitter<ChatState> emit,
   ) async {
+    if (isClosed) return;
     if (_currentSessionId == null) return;
     if (state is ChatStreaming) return; // Block khi đang stream
 
@@ -324,5 +328,11 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     } catch (e) {
       emit(ChatError(message: e.toString(), messages: _currentMessages));
     }
+  }
+
+  @override
+  Future<void> close() async {
+    _accumulatedText = '';
+    return super.close();
   }
 }

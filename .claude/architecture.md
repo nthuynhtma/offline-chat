@@ -105,7 +105,7 @@ Services thuần, không phụ thuộc Flutter:
 | Service | Trách nhiệm |
 |---------|-------------|
 | `GemmaService` | Wrapper flutter_gemma, generate/stream |
-| `GeckoService` | Wrapper tflite_flutter, embed text → vector |
+| `GeckoService` | Wrapper flutter_gemma EmbeddingModel, embed text → vector (KHÔNG còn tflite_flutter) |
 | `VectorStoreService` | CRUD vector, cosine search trên SQLite |
 | `DocumentParserService` | Parse PDF/DOCX/TXT → rawText |
 | `ChunkingService` | Split text → chunks với overlap |
@@ -173,7 +173,12 @@ HNSW không khả dụng native → dùng brute-force search với SQLite, đủ
 
 ## 6. Dependency Injection
 
-Dùng `get_it` package:
+Dùng `get_it` package kết hợp `MultiBlocProvider` ở top-level `app.dart`:
+
+**Nguyên tắc quan trọng:**
+- **GetIt**: quản lý dependency graph (services, repositories, các bloc singleton)
+- **MultiBlocProvider ở app.dart**: nắm lifecycle cho các singleton bloc → tránh Bad state do BlocProvider tự động dispose bloc khi page pop
+- **ChatBloc**: là ngoại lệ — mỗi session cần 1 instance riêng, giữ `BlocProvider` ở `ChatPage` với `key: ValueKey('chat_$sessionId')`
 
 ```dart
 // injection/service_locator.dart
@@ -182,23 +187,40 @@ final sl = GetIt.instance;
 Future<void> setupLocator() async {
   // Services (Singleton)
   sl.registerLazySingleton<GemmaService>(() => GemmaServiceImpl());
-  sl.registerLazySingleton<GeckoService>(() => GeckoServiceImpl());
-  sl.registerLazySingleton<VectorStoreService>(() => VectorStoreServiceImpl(sl()));
+  sl.registerLazySingleton<GeckoService>(() => GeckoRetryService(GeckoServiceImpl()));
+  sl.registerLazySingleton<VectorStoreService>(() => VectorStoreServiceImpl(sl<AppDatabase>()));
   sl.registerLazySingleton<DocumentParserService>(() => DocumentParserServiceImpl());
   sl.registerLazySingleton<ChunkingService>(() => ChunkingServiceImpl());
-  sl.registerLazySingleton<ContextManagerService>(() => ContextManagerServiceImpl(sl(), sl()));
+  sl.registerLazySingleton<ContextManagerService>(() => ContextManagerService(sl(), sl()));
   sl.registerLazySingleton<PromptBuilderService>(() => PromptBuilderServiceImpl());
 
   // Repositories (Singleton)
   sl.registerLazySingleton<MessageRepository>(() => MessageRepositoryImpl(sl()));
   sl.registerLazySingleton<SessionRepository>(() => SessionRepositoryImpl(sl()));
-  sl.registerLazySingleton<DocumentRepository>(() => DocumentRepositoryImpl(sl(), sl()));
+  sl.registerLazySingleton<DocumentRepository>(() => DocumentRepositoryImpl(sl()));
 
-  // Blocs (Factory - mới mỗi lần)
-  sl.registerFactory<ChatBloc>(() => ChatBloc(sl(), sl(), sl()));
-  sl.registerFactory<SessionBloc>(() => SessionBloc(sl()));
-  sl.registerFactory<KnowledgeBloc>(() => KnowledgeBloc(sl()));
-  sl.registerFactory<ModelBloc>(() => ModelBloc(sl()));
+  // Blocs
+  // LazySingleton — lifecycle do MultiBlocProvider ở app.dart quản lý
+  sl.registerLazySingleton<ModelBloc>(() => ModelBloc(...));
+  sl.registerLazySingleton<SessionBloc>(() => SessionBloc(sl()));
+  sl.registerLazySingleton<KnowledgeBloc>(() => KnowledgeBloc(sl()));
+  // Factory — mỗi session cần instance riêng
+  sl.registerFactory<ChatBloc>(() => ChatBloc(...));
+}
+```
+
+**app.dart** triển khai `MultiBlocProvider`:
+```dart
+@override
+Widget build(BuildContext context) {
+  return MultiBlocProvider(
+    providers: [
+      BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
+      BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
+      BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
+    ],
+    child: ValueListenableBuilder<ThemeMode>(...),
+  );
 }
 ```
 

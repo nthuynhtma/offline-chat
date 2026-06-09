@@ -100,6 +100,48 @@ double norm = sqrt(embedding.map((v) => v * v).reduce((a, b) => a + b));
 
 ---
 
+## Embedding / Gecko
+
+### Pitfall: Dùng tflite_flutter Interpreter sai format
+```dart
+// ❌ SAI - interpreter.run() với List<List<String>> không phải tensor hợp lệ
+final input = texts.map((t) => [t]).toList();
+final output = List.generate(texts.length, (_) => List<double>.filled(768, 0.0));
+interpreter.run(input, output); // → Bad state: failed precondition
+
+// ✅ ĐÚNG - dùng flutter_gemma EmbeddingModel API
+// flutter_gemma tự xử lý tokenizer (SentencePiece) + correct tensor shapes
+final model = await FlutterGemma.getActiveEmbedder();
+final vectors = await model.generateEmbeddings(texts, taskType: TaskType.retrievalDocument);
+```
+
+### Pitfall: Quên registerModel trước khi initialize
+```dart
+// ❌ SAI - FlutterGemma.getActiveEmbedder() sẽ throw StateError
+// nếu chưa có active embedding model
+await geckoService.initialize();
+
+// ✅ ĐÚNG - gọi registerModel trước
+await geckoService.registerModel(
+  modelPath: '/path/to/model.tflite',
+  tokenizerPath: '/path/to/sentencepiece.model',
+);
+await geckoService.initialize();
+```
+
+### Pitfall: Thiếu tokenizer file
+```dart
+// Gecko model cần tokenizer SentencePiece (~4MB) đi kèm
+// flutter_gemma yêu cầu cả model + tokenizer để install embedder
+// Nếu thiếu tokenizer → FlutterGemma.installEmbedder() sẽ fail
+
+// ✅ Giải pháp: download cả 2 files trước khi register
+await modelManager.downloadGecko();          // .tflite file
+await modelManager.downloadGeckoTokenizer(); // .model file (SentencePiece)
+```
+
+---
+
 ## Bloc
 
 ### Pitfall: Emit after close
@@ -132,21 +174,56 @@ class ChatLoaded extends ChatState with EquatableMixin {
 }
 ```
 
-### Pitfall: BlocProvider scope sai
+### Pitfall: GetIt Singleton + BlocProvider → Bad state (quan trọng!)
 ```dart
-// ❌ SAI - ChatBloc không accessible ở route con
-MaterialApp(
-  home: BlocProvider(create: (_) => ChatBloc()),
-  // Nhưng dùng Navigator.push() → ChatPage không trong subtree này
-)
+// Root cause: GetIt giữ singleton, BlocProvider dispose bloc khi page pop.
+// Lần sau context.read<Bloc>() dùng instance đã dispose → StateError (Bad state)
 
-// ✅ ĐÚNG - Provide Bloc trong Page, không ở root
-class ChatPage extends StatelessWidget {
-  @override
+// ❌ SAI: mỗi page tự tạo BlocProvider với GetIt singleton
+class ModelManagerPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocProvider(
-      create: (_) => sl<ChatBloc>(),
-      child: ChatView(),
+      create: (_) => sl<ModelBloc>()..add(const StatusChecked()),  // ← GetIt singleton
+      child: _View(),
+    );
+  }
+}
+// → Khi page pop, BlocProvider dispose ModelBloc.
+// → GetIt vẫn giữ reference đến instance đã dispose.
+// → Lần sau vào trang lại, sl<ModelBloc>() trả về instance đã chết → Bad state
+
+// ✅ ĐÚNG: Gom singleton bloc vào MultiBlocProvider ở app.dart
+// Các page chỉ context.read<T>() mà không tạo BlocProvider
+// app.dart:
+@override
+Widget build(BuildContext context) {
+  return MultiBlocProvider(
+    providers: [
+      BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
+      BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
+      BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
+    ],
+    child: MaterialApp.router(...),
+  );
+}
+
+// Các page chỉ cần:
+class ModelManagerPage extends StatelessWidget {
+  const ModelManagerPage({super.key});
+  Widget build(BuildContext context) {
+    return const _ModelManagerView(); // context.watch<ModelBloc>() tự tìm lên trên
+  }
+}
+
+// Ngoại lệ: ChatBloc (factory pattern) — mỗi session 1 instance riêng
+// Giữ BlocProvider ở ChatPage với key để Flutter tự dispose
+class ChatPage extends StatelessWidget {
+  final String sessionId;
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      key: ValueKey('chat_$sessionId'),  // ← quan trọng: mới khi session đổi
+      create: (_) => sl<ChatBloc>()..add(SessionInitialized(sessionId)),
+      child: ChatView(sessionId: sessionId),
     );
   }
 }

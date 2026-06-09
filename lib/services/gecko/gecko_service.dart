@@ -1,96 +1,104 @@
-import 'dart:io';
-import 'dart:math';
-
-import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:flutter_gemma/flutter_gemma.dart';
 
 import 'package:offline_chat/core/errors/app_exception.dart';
 
 abstract interface class GeckoService {
-  /// Load Gecko TFLite model
-  Future<void> initialize(String modelPath);
+  /// Đăng ký model + tokenizer với flutter_gemma.
+  /// Gọi 1 lần sau khi cả 2 file đã được download.
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  });
+
+  /// Initialize Gecko embedding model via flutter_gemma.
+  /// Cần gọi [registerModel] trước.
+  Future<void> initialize();
 
   bool get isReady;
 
   Future<void> dispose();
 
-  /// Embed một đoạn text → vector 768 chiều
+  /// Embed một đoạn text → vector 768 chiều (query mode)
   Future<List<double>> embed(String text);
 
-  /// Embed nhiều đoạn cùng lúc (batch)
+  /// Embed nhiều đoạn cùng lúc (batch) — document mode
   Future<List<List<double>>> embedBatch(List<String> texts);
 }
 
-/// TensorFlow Lite implementation of Gecko embedding service.
+/// Implementation using flutter_gemma's built-in EmbeddingModel API.
 ///
-/// Uses the Gecko 110M embedding model to convert text into
-/// 768-dimensional vectors for semantic search.
+/// Uses `FlutterGemma.getActiveEmbedder()` to obtain the embedding model
+/// (Gecko 110M or EmbeddingGemma), which handles tokenization, inference,
+/// and normalization internally. No raw TFLite [`Interpreter`] needed.
 class GeckoServiceImpl implements GeckoService {
-  Interpreter? _interpreter;
+  EmbeddingModel? _embeddingModel;
+  bool _registered = false;
 
   @override
-  bool get isReady => _interpreter != null;
+  bool get isReady => _embeddingModel != null;
 
   @override
-  Future<void> initialize(String modelPath) async {
-    final file = File(modelPath);
-    if (!await file.exists()) {
-      throw const ModelNotLoadedException();
-    }
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  }) async {
+    if (_registered) return;
+
     try {
-      _interpreter = await Interpreter.fromFile(file);
+      await FlutterGemma.installEmbedder()
+          .modelFromFile(modelPath)
+          .tokenizerFromFile(tokenizerPath)
+          .install();
+      _registered = true;
     } catch (e) {
-      throw EmbeddingException('Failed to load Gecko model: $e');
+      throw EmbeddingException('Failed to register embedding model: $e');
+    }
+  }
+
+  @override
+  Future<void> initialize() async {
+    if (_embeddingModel != null) return;
+
+    try {
+      _embeddingModel = await FlutterGemma.getActiveEmbedder();
+    } catch (e) {
+      throw EmbeddingException('Failed to initialize embedding model: $e');
     }
   }
 
   @override
   Future<void> dispose() async {
-    _interpreter?.close();
-    _interpreter = null;
+    await _embeddingModel?.close();
+    _embeddingModel = null;
   }
 
   @override
   Future<List<double>> embed(String text) async {
-    final results = await embedBatch([text]);
-    return results.first;
+    final model = _embeddingModel;
+    if (model == null) throw const ModelNotLoadedException();
+
+    try {
+      return await model.generateEmbedding(
+        text,
+        taskType: TaskType.retrievalQuery,
+      );
+    } catch (e) {
+      throw EmbeddingException('Embedding failed: $e');
+    }
   }
 
   @override
   Future<List<List<double>>> embedBatch(List<String> texts) async {
-    final interpreter = _interpreter;
-    if (interpreter == null) {
-      throw const ModelNotLoadedException();
-    }
+    final model = _embeddingModel;
+    if (model == null) throw const ModelNotLoadedException();
 
     try {
-      // Gecko 110M input: tokenized strings → output: float32[768]
-      // The TFLite model accepts raw strings and tokenizes internally
-      final input = texts.map((t) => [t]).toList();
-      final output = List.generate(
-        texts.length,
-        (_) => List<double>.filled(768, 0.0),
+      return await model.generateEmbeddings(
+        texts,
+        taskType: TaskType.retrievalDocument,
       );
-
-      interpreter.run(input, output);
-
-      // Normalize vectors if not already normalized
-      final normalized = <List<double>>[];
-      for (final vec in output) {
-        double norm = 0;
-        for (final v in vec) {
-          norm += v * v;
-        }
-        norm = sqrt(norm);
-        if (norm > 0) {
-          normalized.add(vec.map((v) => v / norm).toList());
-        } else {
-          normalized.add(vec);
-        }
-      }
-
-      return normalized;
     } catch (e) {
-      throw EmbeddingException('Embedding failed: $e');
+      throw EmbeddingException('Embedding batch failed: $e');
     }
   }
 }

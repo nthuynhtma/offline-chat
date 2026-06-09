@@ -71,6 +71,9 @@ abstract interface class ModelManagerService {
   /// Bắt đầu download Gecko model (no-op nếu đang download)
   Future<void> downloadGecko();
 
+  /// Bắt đầu download tokenizer cho Gecko (SentencePiece model)
+  Future<void> downloadGeckoTokenizer();
+
   /// Huỷ download của đúng file được chỉ định
   Future<void> cancelDownload(String fileName);
 
@@ -100,6 +103,12 @@ class ModelManagerServiceImpl implements ModelManagerService {
   static const String _modelsDir = 'models';
   // Tolerance khi so sánh kích thước file: ±5 MB
   static const int _sizeTolerance = 5 * 1024 * 1024;
+
+  // Tokenizer constants
+  static const String kTokenizerFileName = 'sentencepiece.model';
+  static const String kTokenizerUrl =
+      'https://huggingface.co/litert-community/Gecko-110m-en/resolve/main/sentencepiece.model';
+  static const int kTokenizerSizeBytes = 4194304; // ~4 MB
 
   ModelInfo _gemmaInfo = const ModelInfo(
     name: 'Gemma 4E2B IT',
@@ -210,6 +219,39 @@ class ModelManagerServiceImpl implements ModelManagerService {
       onUpdate: (info) {
         _geckoInfo = info;
         _safeEmit(info);
+      },
+    );
+  }
+
+  @override
+  Future<void> downloadGeckoTokenizer() async {
+    if (_modelsDirectory == null) await initialize();
+
+    final tokenizerPath = p.join(_modelsDirectory!, kTokenizerFileName);
+    final tokenizerFile = File(tokenizerPath);
+    // Skip if already exists with valid size
+    if (await tokenizerFile.exists()) {
+      final size = await tokenizerFile.length();
+      if ((size - kTokenizerSizeBytes).abs() < _sizeTolerance) {
+        return;
+      }
+    }
+
+    final tokenizerInfo = ModelInfo(
+      name: 'Gecko Tokenizer',
+      fileName: kTokenizerFileName,
+      downloadUrl: kTokenizerUrl,
+      fileSizeBytes: kTokenizerSizeBytes,
+    );
+
+    await _startDownload(
+      modelInfo: tokenizerInfo,
+      onUpdate: (info) {
+        // Chỉ emit tokenizer update, không gán vào _geckoInfo (không phải model chính)
+        if (info.status == ModelStatus.downloaded ||
+            info.status == ModelStatus.error) {
+          _safeEmit(info);
+        }
       },
     );
   }
@@ -362,8 +404,13 @@ class ModelManagerServiceImpl implements ModelManagerService {
     final size = await file.length();
     final expectedSize = fileName == kGemmaModelFileName
         ? _gemmaInfo.fileSizeBytes
-        : _geckoInfo.fileSizeBytes;
+        : fileName == kGeckoModelFileName
+            ? _geckoInfo.fileSizeBytes
+            : fileName == kTokenizerFileName
+                ? kTokenizerSizeBytes
+                : null;
 
+    if (expectedSize == null) return false;
     return (size - expectedSize).abs() < _sizeTolerance;
   }
 

@@ -253,10 +253,61 @@ Stream<String> generateStream(String prompt) async* {
 
 ---
 
-## 7. UI Conventions
+## 7. BlocProvider Pattern — QUAN TRỌNG
+
+### Singleton Blocs (ModelBloc, SessionBloc, KnowledgeBloc)
+
+**KHÔNG** tạo `BlocProvider` trong page. Gom tất cả ở **`app.dart`** dùng `MultiBlocProvider`:
 
 ```dart
-// Mỗi Page/Screen là StatelessWidget, inject Bloc từ BlocProvider
+// app.dart
+@override
+Widget build(BuildContext context) {
+  return MultiBlocProvider(
+    providers: [
+      BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
+      BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
+      BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
+      // KHÔNG có ChatBloc ở đây — mỗi session 1 instance riêng
+    ],
+    child: ValueListenableBuilder<ThemeMode>(...),
+  );
+}
+```
+
+Page chỉ cần `const` widget, không wrapper:
+```dart
+class ModelManagerPage extends StatelessWidget {
+  const ModelManagerPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const _ModelManagerView();
+  }
+}
+
+class SessionListPage extends StatelessWidget {
+  const SessionListPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const SessionListView();
+  }
+}
+
+class KnowledgePage extends StatelessWidget {
+  const KnowledgePage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const KnowledgeView();
+  }
+}
+```
+
+**Lý do:** Tránh `Bad state` khi GetIt singleton bị BlocProvider dispose.
+
+### Factory Blocs (ChatBloc — mỗi session 1 instance)
+
+Giữ `BlocProvider` ở page, nhưng thêm `key`:
+```dart
 class ChatPage extends StatelessWidget {
   final String sessionId;
   const ChatPage({required this.sessionId, super.key});
@@ -264,25 +315,9 @@ class ChatPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
+      key: ValueKey('chat_$sessionId'), // ← đảm bảo tạo mới khi session đổi
       create: (_) => sl<ChatBloc>()..add(SessionInitialized(sessionId)),
-      child: const ChatView(),
-    );
-  }
-}
-
-// View widget chứa layout chính
-class ChatView extends StatelessWidget {
-  const ChatView({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Column(
-        children: [
-          Expanded(child: MessageList()),
-          ChatInputBar(),
-        ],
-      ),
+      child: ChatView(sessionId: sessionId),
     );
   }
 }
@@ -330,8 +365,9 @@ dependencies:
   equatable: ^2.0.5
 
   # AI
-  flutter_gemma: ^0.13.1
-  tflite_flutter: ^0.10.4
+  flutter_gemma: ^0.16.4
+  # tflite_flutter: ^0.12.1  ← Gecko embedding đã migrate sang flutter_gemma EmbeddingModel API
+  # Chỉ giữ tflite_flutter nếu cần cho mục đích khác ngoài Gecko
 
   # Database
   drift: ^2.18.0

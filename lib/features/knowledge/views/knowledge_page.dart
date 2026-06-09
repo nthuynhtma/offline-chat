@@ -6,17 +6,13 @@ import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
 import 'package:offline_chat/features/knowledge/bloc/knowledge_bloc.dart';
 import 'package:offline_chat/features/knowledge/models/document_model.dart';
-import 'package:offline_chat/injection/service_locator.dart';
 
 class KnowledgePage extends StatelessWidget {
   const KnowledgePage({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded()),
-      child: const KnowledgeView(),
-    );
+    return const KnowledgeView();
   }
 }
 

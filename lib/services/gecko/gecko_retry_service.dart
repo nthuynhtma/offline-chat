@@ -13,8 +13,18 @@ class GeckoRetryService implements GeckoService {
   bool get isReady => _inner.isReady;
 
   @override
-  Future<void> initialize(String modelPath) =>
-      _inner.initialize(modelPath);
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  }) =>
+      _inner.registerModel(
+        modelPath: modelPath,
+        tokenizerPath: tokenizerPath,
+      );
+
+  @override
+  Future<void> initialize() =>
+      _inner.initialize();
 
   @override
   Future<void> dispose() => _inner.dispose();

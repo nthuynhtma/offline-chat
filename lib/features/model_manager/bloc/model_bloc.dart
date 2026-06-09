@@ -217,6 +217,10 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
         ),
       ));
     });
+    // Đồng thời download tokenizer (SentencePiece model)
+    _modelManager.downloadGeckoTokenizer().catchError((_) {
+      // Tokenizer download failure không block model usage
+    });
 
     emit(ModelLoaded(
       gemmaInfo: _modelManager.gemmaInfo,
@@ -273,19 +277,28 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   /// Gọi GemmaService.initialize(). Trả về true nếu thành công.
   /// flutter_gemma tự detect model qua native layer — không cần truyền path.
   Future<bool> _tryInitializeGemma() async {
-    try {
-      await _gemmaService.initialize();
-      return _gemmaService.isReady;
-    } catch (_) {
-      return false;
-    }
+  try {
+    final path = await _modelManager.getModelPath(kGemmaModelFileName);
+    await _gemmaService.initialize(modelPath: path); // truyền path
+    return _gemmaService.isReady;
+  } catch (_) {
+    return false;
   }
+}
 
-  /// Gọi GeckoService.initialize() với path thực tế trên disk.
+  /// Gọi GeckoService.registerModel() + initialize() qua flutter_gemma API.
+  /// Cần cả model TFLite và tokenizer SentencePiece trên disk.
   Future<bool> _tryInitializeGecko() async {
     try {
-      final path = await _modelManager.getModelPath(kGeckoModelFileName);
-      await _geckoService.initialize(path); // positional, không phải named
+      final modelPath =
+          await _modelManager.getModelPath(kGeckoModelFileName);
+      final tokenizerPath =
+          await _modelManager.getModelPath(kGeckoTokenizerFileName);
+      await _geckoService.registerModel(
+        modelPath: modelPath,
+        tokenizerPath: tokenizerPath,
+      );
+      await _geckoService.initialize();
       return _geckoService.isReady;
     } catch (_) {
       return false;

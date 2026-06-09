@@ -1,6 +1,91 @@
 # Implementation Examples
 
-## 1. GemmaService Implementation
+## 1. GeckoService (flutter_gemma EmbeddingModel — KHÔNG dùng tflite_flutter)
+
+```dart
+// services/gecko/gecko_service.dart
+import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:offline_chat/core/errors/app_exception.dart';
+
+abstract interface class GeckoService {
+  /// Đăng ký model + tokenizer với flutter_gemma
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  });
+
+  /// Initialize từ FlutterGemma.getActiveEmbedder()
+  Future<void> initialize();
+  bool get isReady;
+  Future<void> dispose();
+
+  /// Embed text → vector (query mode)
+  Future<List<double>> embed(String text);
+
+  /// Embed batch texts → vectors (document mode)
+  Future<List<List<double>>> embedBatch(List<String> texts);
+}
+
+class GeckoServiceImpl implements GeckoService {
+  EmbeddingModel? _embeddingModel;
+  bool _registered = false;
+
+  @override
+  Future<void> registerModel({
+    required String modelPath,
+    required String tokenizerPath,
+  }) async {
+    if (_registered) return;
+    // flutter_gemma tự xử lý tokenizer + model registration
+    await FlutterGemma.installEmbedder()
+        .modelFromFile(modelPath)
+        .tokenizerFromFile(tokenizerPath)
+        .install();
+    _registered = true;
+  }
+
+  @override
+  Future<void> initialize() async {
+    if (_embeddingModel != null) return;
+    // Lấy active embedder đã register từ bước trên
+    _embeddingModel = await FlutterGemma.getActiveEmbedder();
+  }
+
+  @override
+  Future<List<double>> embed(String text) async {
+    final model = _embeddingModel;
+    if (model == null) throw const ModelNotLoadedException();
+    return model.generateEmbedding(text, taskType: TaskType.retrievalQuery);
+  }
+
+  @override
+  Future<List<List<double>>> embedBatch(List<String> texts) async {
+    final model = _embeddingModel;
+    if (model == null) throw const ModelNotLoadedException();
+    return model.generateEmbeddings(texts, taskType: TaskType.retrievalDocument);
+  }
+}
+```
+
+**Lưu ý:** `GeckoRetryService` là decorator wrapping `GeckoServiceImpl` với retry logic (max 3 lần, exponential backoff).
+
+### Flow đầy đủ: Download → Register → Initialize → Embed
+
+```
+1. User bấm "Download Gecko"
+2. ModelBloc → ModelManagerService.downloadGecko()  (file .tflite ~110MB)
+                       .downloadGeckoTokenizer()      (file .model ~4MB)
+3. Download xong → _tryInitializeGecko() được gọi:
+   a. getModelPath(kGeckoModelFileName)            → path tới .tflite
+   b. getModelPath(kGeckoTokenizerFileName)         → path tới .model
+   c. GeckoService.registerModel(modelPath, tokenizerPath) → FlutterGemma.installEmbedder()
+   d. GeckoService.initialize()                     → FlutterGemma.getActiveEmbedder()
+4. Sẵn sàng embed text
+```
+
+---
+
+## 3. GemmaService Implementation
 
 ```dart
 // services/gemma/gemma_service_impl.dart
@@ -51,7 +136,7 @@ class GemmaServiceImpl implements GemmaService {
 
 ---
 
-## 2. VectorStore - Cosine Search
+## 4. VectorStore - Cosine Search
 
 ```dart
 // services/vectorstore/vector_store_service_impl.dart
@@ -126,7 +211,7 @@ class _ScoredResult {
 
 ---
 
-## 3. ChunkingService
+## 5. ChunkingService
 
 ```dart
 // services/chunker/chunking_service_impl.dart
@@ -171,7 +256,7 @@ class ChunkingServiceImpl implements ChunkingService {
 
 ---
 
-## 4. ContextManagerService
+## 6. ContextManagerService
 
 ```dart
 // services/context/context_manager_service_impl.dart
@@ -244,7 +329,7 @@ class ContextManagerServiceImpl implements ContextManagerService {
 
 ---
 
-## 5. PromptBuilder - Gemma format
+## 7. PromptBuilder - Gemma format
 
 ```dart
 // services/prompt/prompt_builder_service_impl.dart
@@ -287,7 +372,7 @@ class PromptBuilderServiceImpl implements PromptBuilderService {
 
 ---
 
-## 6. ChatBloc - Streaming với emit.forEach
+## 8. ChatBloc - Streaming với emit.forEach
 
 ```dart
 // features/chat/bloc/chat_bloc.dart
@@ -415,7 +500,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
 ---
 
-## 7. ChatPage - UI
+## 9. ChatPage - UI
 
 ```dart
 // features/chat/views/chat_page.dart

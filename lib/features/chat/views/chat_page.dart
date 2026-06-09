@@ -16,6 +16,7 @@ class ChatPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
+      key: ValueKey('chat_$sessionId'),
       create: (_) => sl<ChatBloc>()..add(SessionInitialized(sessionId)),
       child: ChatView(sessionId: sessionId),
     );
@@ -38,16 +39,13 @@ class ChatView extends StatelessWidget {
         actions: [
           // FIX #11: Disable delete button khi đang streaming
           BlocBuilder<ChatBloc, ChatState>(
-            buildWhen: (prev, curr) =>
-                (prev is ChatStreaming) != (curr is ChatStreaming),
+            buildWhen: (prev, curr) => (prev is ChatStreaming) != (curr is ChatStreaming),
             builder: (context, state) {
               final isStreaming = state is ChatStreaming;
               return IconButton(
                 icon: Icon(
                   Icons.delete_outline,
-                  color: isStreaming
-                      ? AppColors.subtleLight.withOpacity(0.4)
-                      : null,
+                  color: isStreaming ? AppColors.subtleLight.withOpacity(0.4) : null,
                 ),
                 onPressed: isStreaming
                     ? null
@@ -55,8 +53,7 @@ class ChatView extends StatelessWidget {
                           context: context,
                           builder: (ctx) => AlertDialog(
                             title: const Text('Xóa tin nhắn'),
-                            content: const Text(
-                                'Xóa toàn bộ tin nhắn trong cuộc trò chuyện này?'),
+                            content: const Text('Xóa toàn bộ tin nhắn trong cuộc trò chuyện này?'),
                             actions: [
                               TextButton(
                                 onPressed: () => Navigator.of(ctx).pop(),
@@ -64,14 +61,10 @@ class ChatView extends StatelessWidget {
                               ),
                               TextButton(
                                 onPressed: () {
-                                  context
-                                      .read<ChatBloc>()
-                                      .add(const MessagesCleared());
+                                  context.read<ChatBloc>().add(const MessagesCleared());
                                   Navigator.of(ctx).pop();
                                 },
-                                child: const Text('Xóa',
-                                    style:
-                                        TextStyle(color: AppColors.error)),
+                                child: const Text('Xóa', style: TextStyle(color: AppColors.error)),
                               ),
                             ],
                           ),
@@ -98,15 +91,13 @@ class ChatView extends StatelessWidget {
                   color: AppColors.warning.withOpacity(0.2),
                   child: Row(
                     children: [
-                      const Icon(Icons.warning_amber,
-                          color: AppColors.warning),
+                      const Icon(Icons.warning_amber, color: AppColors.warning),
                       const SizedBox(width: AppSpacing.sm),
                       const Expanded(
                         child: Text('Model AI chưa được tải'),
                       ),
                       TextButton(
-                        onPressed: () =>
-                            context.push('/settings/models'),
+                        onPressed: () => context.push('/settings/models'),
                         child: const Text('Tải'),
                       ),
                     ],
@@ -132,15 +123,12 @@ class ChatView extends StatelessWidget {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Icon(Icons.error_outline,
-                              size: 48, color: AppColors.error),
+                          const Icon(Icons.error_outline, size: 48, color: AppColors.error),
                           const SizedBox(height: AppSpacing.md),
                           Text(state.message),
                           const SizedBox(height: AppSpacing.md),
                           ElevatedButton(
-                            onPressed: () => context
-                                .read<ChatBloc>()
-                                .add(SessionInitialized(sessionId)),
+                            onPressed: () => context.read<ChatBloc>().add(SessionInitialized(sessionId)),
                             child: const Text('Thử lại'),
                           ),
                         ],
@@ -178,13 +166,11 @@ class ChatView extends StatelessWidget {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.chat_bubble_outline,
-                            size: 64, color: AppColors.subtleLight),
+                        Icon(Icons.chat_bubble_outline, size: 64, color: AppColors.subtleLight),
                         const SizedBox(height: AppSpacing.md),
                         const Text(
                           'Bắt đầu cuộc trò chuyện',
-                          style:
-                              TextStyle(color: AppColors.subtleLight),
+                          style: TextStyle(color: AppColors.subtleLight),
                         ),
                       ],
                     ),
@@ -225,8 +211,7 @@ class _MessageList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.builder(
-      padding:
-          const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.md),
+      padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.md),
       itemCount: messages.length + (streamingText != null ? 1 : 0),
       itemBuilder: (context, index) {
         if (streamingText != null && index == messages.length) {
@@ -256,19 +241,16 @@ class _ErrorBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
       color: AppColors.error.withOpacity(0.1),
       child: Row(
         children: [
-          const Icon(Icons.error_outline,
-              size: 16, color: AppColors.error),
+          const Icon(Icons.error_outline, size: 16, color: AppColors.error),
           const SizedBox(width: AppSpacing.xs),
           Expanded(
             child: Text(
               message,
-              style: const TextStyle(
-                  fontSize: 12, color: AppColors.error),
+              style: const TextStyle(fontSize: 12, color: AppColors.error),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -338,9 +320,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   minLines: 1,
                   textInputAction: TextInputAction.send,
                   decoration: InputDecoration(
-                    hintText: _isStreaming
-                        ? 'Đang trả lời...'
-                        : 'Nhập tin nhắn...',
+                    hintText: _isStreaming ? 'Đang trả lời...' : 'Nhập tin nhắn...',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(24),
                       borderSide: BorderSide.none,
@@ -359,8 +339,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
               // FIX: Khi streaming hiện nút Cancel thay vì nút Send bị disable
               if (_isStreaming)
                 IconButton(
-                  onPressed: () =>
-                      context.read<ChatBloc>().add(const StreamingCancelled()),
+                  onPressed: () => context.read<ChatBloc>().add(const StreamingCancelled()),
                   icon: const Icon(Icons.stop_circle_outlined),
                   color: AppColors.error,
                   tooltip: 'Dừng',

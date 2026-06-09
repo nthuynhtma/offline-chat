@@ -30,6 +30,15 @@ class GemmaServiceImpl implements GemmaService {
   @override
   Future<void> initialize({String? modelPath, int maxTokens = 1024}) async {
     try {
+      // Bước 1: Đăng ký file với flutter_gemma qua installModel().fromFile()
+      if (modelPath != null) {
+        await FlutterGemma.installModel(
+          modelType: ModelType.gemmaIt,
+          fileType: ModelFileType.litertlm,
+        ).fromFile(modelPath).install();
+      }
+
+      // Bước 2: Lấy model đã đăng ký
       _model = await FlutterGemma.getActiveModel(
         maxTokens: maxTokens,
         preferredBackend: PreferredBackend.gpu,

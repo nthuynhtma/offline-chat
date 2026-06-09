@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import 'package:offline_chat/features/chat/views/chat_page.dart';
+import 'package:offline_chat/features/knowledge/bloc/knowledge_bloc.dart';
 import 'package:offline_chat/features/knowledge/views/knowledge_page.dart';
+import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/model_manager/views/model_manager_page.dart';
+import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/views/session_list_page.dart';
 import 'package:offline_chat/features/settings/views/settings_page.dart';
+import 'package:offline_chat/injection/service_locator.dart';
 
 /// Global notifier for theme mode (light/dark).
 /// Can be toggled from SettingsPage.
@@ -50,30 +55,43 @@ class App extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: themeModeNotifier,
-      builder: (context, mode, _) {
-        return MaterialApp.router(
-          title: 'Offline Chat',
-          debugShowCheckedModeBanner: false,
-          routerConfig: _router,
-          themeMode: mode,
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF1A73E8),
-              brightness: Brightness.light,
+    return MultiBlocProvider(
+      providers: [
+        BlocProvider<ModelBloc>(
+          create: (_) => sl<ModelBloc>()..add(const StatusChecked()),
+        ),
+        BlocProvider<SessionBloc>(
+          create: (_) => sl<SessionBloc>()..add(const SessionsLoaded()),
+        ),
+        BlocProvider<KnowledgeBloc>(
+          create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded()),
+        ),
+      ],
+      child: ValueListenableBuilder<ThemeMode>(
+        valueListenable: themeModeNotifier,
+        builder: (context, mode, _) {
+          return MaterialApp.router(
+            title: 'Offline Chat',
+            debugShowCheckedModeBanner: false,
+            routerConfig: _router,
+            themeMode: mode,
+            theme: ThemeData(
+              colorScheme: ColorScheme.fromSeed(
+                seedColor: const Color(0xFF1A73E8),
+                brightness: Brightness.light,
+              ),
+              useMaterial3: true,
             ),
-            useMaterial3: true,
-          ),
-          darkTheme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF1A73E8),
-              brightness: Brightness.dark,
+            darkTheme: ThemeData(
+              colorScheme: ColorScheme.fromSeed(
+                seedColor: const Color(0xFF1A73E8),
+                brightness: Brightness.dark,
+              ),
+              useMaterial3: true,
             ),
-            useMaterial3: true,
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }

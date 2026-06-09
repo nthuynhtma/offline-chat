@@ -3,6 +3,7 @@ import 'dart:ui' as ui show PlatformDispatcher;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_gemma/core/api/flutter_gemma.dart';
 import 'package:offline_chat/app.dart';
 import 'package:offline_chat/injection/service_locator.dart';
 
@@ -37,6 +38,7 @@ void main() async {
     return true; // Prevent app from crashing
   };
 
+  await FlutterGemma.initialize();
   // Setup dependency injection
   await setupLocator();
 

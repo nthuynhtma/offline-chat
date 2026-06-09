@@ -95,7 +95,7 @@ Future<void> setupLocator() async {
 
   // ChatBloc là singleton — tất cả ChatPage dùng chung một instance.
   // GemmaService.isReady sẽ đúng vì cùng instance với ModelBloc đã initialize.
-  sl.registerLazySingleton<ChatBloc>(
+  sl.registerFactory<ChatBloc>(
     () => ChatBloc(
       messageRepo: sl<MessageRepository>(),
       sessionRepo: sl<SessionRepository>(),

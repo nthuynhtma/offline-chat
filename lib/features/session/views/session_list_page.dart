@@ -5,17 +5,13 @@ import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
 import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/models/session_model.dart';
-import 'package:offline_chat/injection/service_locator.dart';
 
 class SessionListPage extends StatelessWidget {
   const SessionListPage({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (_) => sl<SessionBloc>()..add(const SessionsLoaded()),
-      child: const SessionListView(),
-    );
+    return const SessionListView();
   }
 }
 
