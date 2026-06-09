@@ -374,16 +374,31 @@ class _MessageListState extends State<_MessageList> {
   bool _isNearBottom = true;
 
   @override
+  void initState() {
+    super.initState();
+    // Scroll xuống tin nhắn cuối khi vừa vào màn hình
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBottom();
+    });
+  }
+
+  /// Scroll xuống tin nhắn cuối cùng.
+  void _scrollToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
   void didUpdateWidget(covariant _MessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
 
     // Auto-scroll xuống cuối khi user đang ở cuối và có message mới / streaming
-    if (_isNearBottom && _scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-      );
+    if (_isNearBottom) {
+      _scrollToBottom();
     }
   }
 
@@ -430,15 +445,7 @@ class _MessageListState extends State<_MessageList> {
         // Nút "⬇ Mới nhất" — chỉ hiển thị khi user không ở cuối
         _ScrollToBottomButton(
           isVisible: !_isNearBottom,
-          onTap: () {
-            if (_scrollController.hasClients) {
-              _scrollController.animateTo(
-                _scrollController.position.maxScrollExtent,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut,
-              );
-            }
-          },
+          onTap: _scrollToBottom,
         ),
       ],
     );

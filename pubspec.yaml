@@ -52,6 +52,7 @@ dependencies:
   uuid: ^4.4.0
   logger: ^2.7.0
   scrollview_observer: ^1.27.0
+  flutter_markdown_plus: ^1.0.7
 dev_dependencies:
   flutter_test:
     sdk: flutter

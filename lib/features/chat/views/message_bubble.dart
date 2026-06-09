@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart' show MarkdownStyleSheet, MarkdownBody;
 import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
 import 'package:offline_chat/database/tables/messages_table.dart';
@@ -54,16 +55,94 @@ class MessageBubble extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    message.content + (isStreaming ? ' ▊' : ''),
-                    style: TextStyle(
-                      color: isUser
-                          ? AppColors.userBubbleText
-                          : AppColors.assistantBubbleText,
-                      fontSize: 16,
-                      height: 1.4,
+                  if (isUser)
+                    Text(
+                      message.content,
+                      style: TextStyle(
+                        color: AppColors.userBubbleText,
+                        fontSize: 16,
+                        height: 1.4,
+                      ),
+                    )
+                  else
+                    MarkdownBody(
+                      data: message.content + (isStreaming ? ' ▊' : ''),
+                      selectable: true,
+                      styleSheet: MarkdownStyleSheet(
+                        p: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          fontSize: 16,
+                          height: 1.4,
+                        ),
+                        h1: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          height: 1.4,
+                        ),
+                        h2: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          fontSize: 19,
+                          fontWeight: FontWeight.bold,
+                          height: 1.4,
+                        ),
+                        h3: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold,
+                          height: 1.4,
+                        ),
+                        code: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          backgroundColor: Colors.black12,
+                          fontSize: 14,
+                          fontFamily: 'monospace',
+                        ),
+                        codeblockDecoration: BoxDecoration(
+                          color: Colors.black12,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        codeblockPadding: const EdgeInsets.all(12),
+                        blockquoteDecoration: BoxDecoration(
+                          border: Border(
+                            left: BorderSide(
+                              color: AppColors.primaryLight.withOpacity(0.5),
+                              width: 3,
+                            ),
+                          ),
+                          color: Colors.black.withOpacity(0.03),
+                        ),
+                        blockquotePadding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+                        listBullet: TextStyle(
+                          color: AppColors.assistantBubbleText,
+                          fontSize: 16,
+                        ),
+                        a: TextStyle(
+                          color: AppColors.primaryLight,
+                          decoration: TextDecoration.underline,
+                        ),
+                        strong: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.assistantBubbleText,
+                        ),
+                        em: TextStyle(
+                          fontStyle: FontStyle.italic,
+                          color: AppColors.assistantBubbleText,
+                        ),
+                        del: TextStyle(
+                          decoration: TextDecoration.lineThrough,
+                          color: AppColors.assistantBubbleText,
+                        ),
+                        horizontalRuleDecoration: BoxDecoration(
+                          border: Border(
+                            top: BorderSide(
+                              color: AppColors.assistantBubbleText.withOpacity(0.2),
+                              width: 1,
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
                   const SizedBox(height: AppSpacing.xs),
                   Text(
                     _formatTime(message.createdAt),
