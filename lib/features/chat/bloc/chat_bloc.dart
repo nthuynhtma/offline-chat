@@ -87,13 +87,16 @@ class ChatStreaming extends ChatState {
 class ChatError extends ChatState {
   final String message;
   final bool needsModelDownload;
+  // FIX #1: Giữ messages khi có lỗi để UI không mất tin nhắn đã hiển thị
+  final List<MessageModel> messages;
   const ChatError({
     required this.message,
     this.needsModelDownload = false,
+    this.messages = const [],
   });
 
   @override
-  List<Object?> get props => [message, needsModelDownload];
+  List<Object?> get props => [message, needsModelDownload, messages];
 }
 
 // Bloc
@@ -108,6 +111,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   final Uuid _uuid = const Uuid();
 
   String? _currentSessionId;
+
+  // FIX #1: Track accumulated text và currentMessages để cancel có thể lưu
+  String _accumulatedText = '';
+  List<MessageModel> _currentMessages = [];
 
   ChatBloc({
     required MessageRepository messageRepo,
@@ -139,6 +146,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     emit(const ChatLoading());
     try {
       final messages = await _messageRepo.getMessages(event.sessionId);
+      _currentMessages = messages;
       emit(ChatLoaded(messages));
     } catch (e) {
       emit(ChatError(message: e.toString()));
@@ -150,13 +158,21 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     Emitter<ChatState> emit,
   ) async {
     if (_currentSessionId == null) return;
+
+    // FIX #11: Block send nếu đang streaming để tránh race condition
+    if (state is ChatStreaming) return;
+
     if (!_gemmaService.isReady) {
-      emit(const ChatError(
+      emit(ChatError(
         message: 'Model chưa sẵn sàng',
         needsModelDownload: true,
+        messages: _currentMessages,
       ));
       return;
     }
+
+    // Reset tracking
+    _accumulatedText = '';
 
     try {
       // 1. Save user message
@@ -167,9 +183,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       );
 
       final currentMessages = <MessageModel>[
-        ...(state is ChatLoaded ? (state as ChatLoaded).messages : <MessageModel>[]),
+        ..._currentMessages,
         userMsg,
       ];
+      _currentMessages = currentMessages;
       emit(ChatLoaded(currentMessages));
 
       // 2. RAG retrieval
@@ -200,63 +217,112 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
       // 5. Stream response
       final assistantMsgId = _uuid.v4();
-      String accumulated = '';
 
       await emit.forEach<String>(
         _gemmaService.generateStream(prompt),
         onData: (token) {
-          accumulated += token;
+          // FIX #1: Cập nhật _accumulatedText để _onStreamingCancelled có thể dùng
+          _accumulatedText += token;
           return ChatStreaming(
             messages: currentMessages,
-            streamingText: accumulated,
+            streamingText: _accumulatedText,
             streamingId: assistantMsgId,
             ragResults: ragResults.isNotEmpty ? ragResults : null,
           );
         },
-        onError: (error, _) => ChatError(message: error.toString()),
+        onError: (error, _) {
+          // FIX #1: Giữ lại messages khi stream lỗi, không mất chat history
+          return ChatError(
+            message: error.toString(),
+            messages: currentMessages,
+          );
+        },
       );
 
-      // 6. Save complete assistant message
-      final assistantMsg = await _messageRepo.saveMessage(
-        sessionId: _currentSessionId!,
-        role: MessageRole.assistant,
-        content: accumulated,
-      );
+      // 6. FIX #1: Chỉ lưu nếu có nội dung (stream hoàn thành bình thường)
+      // Nếu bị cancel, _accumulatedText vẫn có giá trị và đã được lưu
+      // bởi _onStreamingCancelled → skip nếu rỗng
+      if (_accumulatedText.isNotEmpty && state is! ChatError) {
+        final assistantMsg = await _messageRepo.saveMessage(
+          sessionId: _currentSessionId!,
+          role: MessageRole.assistant,
+          content: _accumulatedText,
+        );
 
-      // 7. Update session timestamp
-      await _sessionRepo.updateSessionTimestamp(_currentSessionId!);
+        // 7. Update session timestamp
+        await _sessionRepo.updateSessionTimestamp(_currentSessionId!);
 
-      emit(ChatLoaded(<MessageModel>[...currentMessages, assistantMsg]));
+        final finalMessages = <MessageModel>[...currentMessages, assistantMsg];
+        _currentMessages = finalMessages;
+        emit(ChatLoaded(finalMessages));
+      }
     } catch (e) {
       if (e is ModelNotLoadedException) {
-        emit(ChatError(message: e.message, needsModelDownload: true));
+        emit(ChatError(
+          message: e.message,
+          needsModelDownload: true,
+          messages: _currentMessages,
+        ));
       } else {
-        emit(ChatError(message: e.toString()));
+        emit(ChatError(
+          message: e.toString(),
+          messages: _currentMessages,
+        ));
       }
     }
   }
 
-  void _onStreamingCancelled(
+  // FIX #1: Cancel lưu partial response vào DB thay vì bỏ đi
+  Future<void> _onStreamingCancelled(
     StreamingCancelled event,
     Emitter<ChatState> emit,
-  ) {
-    // When streaming is cancelled, emit current messages without streaming text
-    if (state is ChatStreaming) {
-      final streamingState = state as ChatStreaming;
-      emit(ChatLoaded(streamingState.messages));
+  ) async {
+    if (state is! ChatStreaming) return;
+
+    final streamingState = state as ChatStreaming;
+
+    if (_accumulatedText.isNotEmpty && _currentSessionId != null) {
+      try {
+        // Lưu partial response với suffix [đã dừng]
+        final partialContent = '$_accumulatedText\n\n_(Đã dừng)_';
+        final assistantMsg = await _messageRepo.saveMessage(
+          sessionId: _currentSessionId!,
+          role: MessageRole.assistant,
+          content: partialContent,
+        );
+        await _sessionRepo.updateSessionTimestamp(_currentSessionId!);
+
+        final finalMessages = <MessageModel>[
+          ...streamingState.messages,
+          assistantMsg,
+        ];
+        _currentMessages = finalMessages;
+        _accumulatedText = '';
+        emit(ChatLoaded(finalMessages));
+        return;
+      } catch (_) {
+        // Nếu lưu DB thất bại, vẫn trả về UI bình thường
+      }
     }
+
+    _accumulatedText = '';
+    emit(ChatLoaded(streamingState.messages));
   }
 
+  // FIX #11: Block delete khi đang streaming
   Future<void> _onMessagesCleared(
     MessagesCleared event,
     Emitter<ChatState> emit,
   ) async {
     if (_currentSessionId == null) return;
+    if (state is ChatStreaming) return; // Block khi đang stream
+
     try {
       await _messageRepo.deleteMessagesBySession(_currentSessionId!);
+      _currentMessages = [];
       emit(const ChatLoaded([]));
     } catch (e) {
-      emit(ChatError(message: e.toString()));
+      emit(ChatError(message: e.toString(), messages: _currentMessages));
     }
   }
 }

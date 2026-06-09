@@ -64,7 +64,8 @@ class VectorStoreServiceImpl implements VectorStoreService {
   }) async {
     try {
       final vector = VectorsCompanion(
-        id: Value('v_${DateTime.now().microsecondsSinceEpoch}_$chunkId'),
+        // FIX #6: chunkId đã unique → dùng trực tiếp làm id, không cần timestamp
+        id: Value('v_$chunkId'),
         chunkId: Value(chunkId),
         embedding: Value(EmbeddingSerializer.serialize(embedding)),
         createdAt: Value(DateTime.now()),
@@ -78,14 +79,24 @@ class VectorStoreServiceImpl implements VectorStoreService {
   @override
   Future<void> insertBatch(List<VectorEntry> entries) async {
     try {
-      final vectors = entries.map((e) {
-        return VectorsCompanion(
-          id: Value('v_${DateTime.now().microsecondsSinceEpoch}_${e.chunkId}'),
+      // FIX #6: Dùng index để đảm bảo ID unique trong batch
+      // (chunkId đã unique theo thiết kế, nhưng index phòng trường hợp duplicate chunkId)
+      final seen = <String>{};
+      final vectors = <VectorsCompanion>[];
+
+      for (var i = 0; i < entries.length; i++) {
+        final e = entries[i];
+        // Nếu chunkId trùng trong cùng batch (không nên xảy ra), skip
+        if (!seen.add(e.chunkId)) continue;
+
+        vectors.add(VectorsCompanion(
+          id: Value('v_${e.chunkId}'),
           chunkId: Value(e.chunkId),
           embedding: Value(EmbeddingSerializer.serialize(e.embedding)),
           createdAt: Value(DateTime.now()),
-        );
-      }).toList();
+        ));
+      }
+
       await _db.vectorsDao.insertVectors(vectors);
     } catch (e) {
       throw StorageException('Failed to insert vectors batch: $e');

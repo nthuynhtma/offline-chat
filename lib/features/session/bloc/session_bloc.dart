@@ -83,6 +83,9 @@ class SessionError extends SessionState {
 class SessionBloc extends Bloc<SessionEvent, SessionState> {
   final SessionRepository _sessionRepository;
 
+  // FIX #4: Cache sessions list để dùng được trong mọi state
+  List<SessionModel> _cachedSessions = [];
+
   SessionBloc(this._sessionRepository) : super(const SessionInitial()) {
     on<SessionsLoaded>(_onSessionsLoaded);
     on<SessionCreated>(_onSessionCreated);
@@ -98,6 +101,7 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     emit(const SessionLoading());
     try {
       final sessions = await _sessionRepository.getAllSessions();
+      _cachedSessions = sessions;
       emit(SessionLoaded(sessions: sessions));
     } catch (e) {
       emit(SessionError(e.toString()));
@@ -109,25 +113,30 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     Emitter<SessionState> emit,
   ) async {
     try {
-      final session = await _sessionRepository.createSession(title: event.title);
+      final session =
+          await _sessionRepository.createSession(title: event.title);
       final sessions = await _sessionRepository.getAllSessions();
+      _cachedSessions = sessions;
       emit(SessionLoaded(sessions: sessions, activeSessionId: session.id));
     } catch (e) {
       emit(SessionError(e.toString()));
     }
   }
 
+  // FIX #4: Dùng _cachedSessions nếu state không phải SessionLoaded
+  // (ví dụ đang SessionLoading hoặc vừa navigate lại)
   void _onSessionSelected(
     SessionSelected event,
     Emitter<SessionState> emit,
   ) {
-    if (state is SessionLoaded) {
-      final current = state as SessionLoaded;
-      emit(SessionLoaded(
-        sessions: current.sessions,
-        activeSessionId: event.id,
-      ));
-    }
+    final sessions = state is SessionLoaded
+        ? (state as SessionLoaded).sessions
+        : _cachedSessions;
+
+    emit(SessionLoaded(
+      sessions: sessions,
+      activeSessionId: event.id,
+    ));
   }
 
   Future<void> _onSessionDeleted(
@@ -138,6 +147,7 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     try {
       await _sessionRepository.deleteSession(event.id);
       final sessions = await _sessionRepository.getAllSessions();
+      _cachedSessions = sessions;
       emit(SessionLoaded(
         sessions: sessions,
         activeSessionId: null,
@@ -154,6 +164,7 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     try {
       await _sessionRepository.updateSessionTitle(event.id, event.title);
       final sessions = await _sessionRepository.getAllSessions();
+      _cachedSessions = sessions;
       emit(SessionLoaded(
         sessions: sessions,
         activeSessionId: event.id,

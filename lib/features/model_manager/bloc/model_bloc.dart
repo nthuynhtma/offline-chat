@@ -3,7 +3,6 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 
-// Internal event for progress updates (not for public use)
 class _ProgressUpdate extends ModelEvent {
   final ModelInfo gemmaInfo;
   final ModelInfo geckoInfo;
@@ -118,22 +117,51 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     GemmaDownloadStarted event,
     Emitter<ModelState> emit,
   ) async {
-    try {
-      await _modelManager.downloadGemma();
-    } catch (e) {
-      emit(ModelError(e.toString()));
-    }
+    _listenToProgress();
+
+    // BUG FIX 4: KHÔNG await downloadGemma() — nó chạy lâu (2.4GB) và sẽ
+    // block event queue của Bloc, khiến các _ProgressUpdate events bị xếp hàng
+    // chứ không được xử lý ngay → UI đứng yên ở 0%.
+    // Dùng unawaited / fire-and-forget, lỗi được bắt qua onUpdate → progressStream.
+    _modelManager.downloadGemma().catchError((e) {
+      add(_ProgressUpdate(
+        gemmaInfo: _modelManager.gemmaInfo.copyWith(
+          status: ModelStatus.error,
+          errorMessage: e.toString(),
+        ),
+        geckoInfo: _modelManager.geckoInfo,
+      ));
+    });
+
+    // Emit trạng thái downloading ngay lập tức (service đã emit qua progressStream
+    // nhưng emit trực tiếp ở đây để UI phản hồi tức thì không cần chờ stream)
+    emit(ModelLoaded(
+      gemmaInfo: _modelManager.gemmaInfo,
+      geckoInfo: _modelManager.geckoInfo,
+    ));
   }
 
   Future<void> _onGeckoDownloadStarted(
     GeckoDownloadStarted event,
     Emitter<ModelState> emit,
   ) async {
-    try {
-      await _modelManager.downloadGecko();
-    } catch (e) {
-      emit(ModelError(e.toString()));
-    }
+    _listenToProgress();
+
+    // BUG FIX 4: Tương tự Gemma — fire-and-forget
+    _modelManager.downloadGecko().catchError((e) {
+      add(_ProgressUpdate(
+        gemmaInfo: _modelManager.gemmaInfo,
+        geckoInfo: _modelManager.geckoInfo.copyWith(
+          status: ModelStatus.error,
+          errorMessage: e.toString(),
+        ),
+      ));
+    });
+
+    emit(ModelLoaded(
+      gemmaInfo: _modelManager.gemmaInfo,
+      geckoInfo: _modelManager.geckoInfo,
+    ));
   }
 
   Future<void> _onDownloadCancelled(
@@ -142,7 +170,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   ) async {
     try {
       await _modelManager.cancelDownload(event.fileName);
-      await _modelManager.initialize(); // Refresh status
+      await _modelManager.initialize();
       emit(ModelLoaded(
         gemmaInfo: _modelManager.gemmaInfo,
         geckoInfo: _modelManager.geckoInfo,
@@ -165,17 +193,15 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   void _listenToProgress() {
     _progressSubscription?.cancel();
     _progressSubscription = _modelManager.progressStream.listen((info) {
-      if (state is ModelLoaded) {
-        final currentState = state as ModelLoaded;
-        add(_ProgressUpdate(
-          gemmaInfo: info.fileName == _modelManager.gemmaInfo.fileName
-              ? info
-              : currentState.gemmaInfo,
-          geckoInfo: info.fileName == _modelManager.geckoInfo.fileName
-              ? info
-              : currentState.geckoInfo,
-        ));
-      }
+      final currentGemma = _modelManager.gemmaInfo;
+      final currentGecko = _modelManager.geckoInfo;
+
+      add(_ProgressUpdate(
+        gemmaInfo:
+            info.fileName == currentGemma.fileName ? info : currentGemma,
+        geckoInfo:
+            info.fileName == currentGecko.fileName ? info : currentGecko,
+      ));
     });
   }
 

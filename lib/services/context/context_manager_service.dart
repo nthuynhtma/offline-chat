@@ -30,8 +30,10 @@ class ContextManagerService {
   static const int ragBudget = 4000;
   static const int historyBudget = 3000;
   static const int questionBudget = 1000;
-  static const int summaryBudget = 500; // Tokens cho summary
-  static const int summaryThreshold = 3000; // Nếu history > 3000 tokens → summarize
+  static const int summaryBudget = 500;
+  static const int summaryThreshold = 3000;
+  // Số messages gần nhất giữ lại khi có summary
+  static const int recentMessagesAfterSummary = 4;
 
   Future<BuiltContext> buildContext({
     required String question,
@@ -43,9 +45,8 @@ class ContextManagerService {
 
     bool historyTrimmed = false;
     String? summary;
-    int estimatedTokens = _estimateTokens(question);
 
-    // Trim RAG if over budget
+    // --- RAG budget trim ---
     int usedRagTokens = 0;
     final trimmedRag = <SearchResult>[];
     for (final result in ragResults) {
@@ -58,29 +59,37 @@ class ContextManagerService {
       }
     }
 
-    // Tính tổng tokens của history
+    // --- History token count ---
     int totalHistoryTokens = 0;
     for (final msg in history) {
       totalHistoryTokens += _estimateTokens(msg.content);
     }
 
-    // Nếu history quá dài → summarize
-    if (totalHistoryTokens > summaryThreshold && _gemmaService != null && _gemmaService!.isReady) {
+    // --- Summarize nếu history quá dài ---
+    if (totalHistoryTokens > summaryThreshold &&
+        _gemmaService != null &&
+        _gemmaService!.isReady) {
       try {
         summary = await _summarizeHistory(history, sessionId);
-        // Dùng summary thay cho history (chỉ giữ lại messages gần nhất)
-        history = history.length > 4 ? history.sublist(history.length - 4) : history;
-        totalHistoryTokens = summaryBudget;
+        // Giữ lại N messages gần nhất sau summary
+        if (history.length > recentMessagesAfterSummary) {
+          history = history.sublist(
+              history.length - recentMessagesAfterSummary);
+        }
+        // FIX #7: Tính đúng tokens của history còn lại sau khi trim
+        totalHistoryTokens = 0;
+        for (final msg in history) {
+          totalHistoryTokens += _estimateTokens(msg.content);
+        }
       } catch (_) {
-        // Graceful degradation: fallback về trim thường nếu summarize fail
         summary = null;
+        // totalHistoryTokens vẫn giữ giá trị gốc → fallback trim bên dưới
       }
     }
 
-    if (summary != null) {
-      estimatedTokens += summaryBudget;
-    } else if (totalHistoryTokens + estimatedTokens > (historyBudget + questionBudget)) {
-      // Trim history if over budget (fallback)
+    // --- Trim history nếu không có summary và vẫn over budget ---
+    if (summary == null &&
+        totalHistoryTokens > historyBudget) {
       final trimmedHistory = <MessageModel>[];
       int usedTokens = 0;
       for (final msg in history.reversed) {
@@ -94,17 +103,22 @@ class ContextManagerService {
         }
       }
       history = trimmedHistory;
-      estimatedTokens += usedTokens;
-    } else {
-      estimatedTokens += totalHistoryTokens;
+      totalHistoryTokens = usedTokens;
     }
+
+    // FIX #7: Tính estimatedTokens chính xác từng phần
+    // question + history thực tế + summary (nếu có) + rag
+    final questionTokens = _estimateTokens(question);
+    final summaryTokens = summary != null ? summaryBudget : 0;
+    final totalEstimated =
+        questionTokens + totalHistoryTokens + summaryTokens + usedRagTokens;
 
     return BuiltContext(
       question: question,
       relevantChunks: trimmedRag,
       history: history,
       historyWasTrimmed: historyTrimmed,
-      estimatedTokens: estimatedTokens + usedRagTokens,
+      estimatedTokens: totalEstimated,
       summary: summary,
     );
   }
@@ -138,8 +152,7 @@ class ContextManagerService {
     buffer.writeln('<end_of_turn>');
     buffer.write('<start_of_turn>model\n');
 
-    final prompt = buffer.toString();
-    final response = await _gemmaService!.generate(prompt);
+    final response = await _gemmaService!.generate(buffer.toString());
 
     // Cache summary
     _summaryCache[cacheKey] = _SummaryCache(
@@ -151,7 +164,8 @@ class ContextManagerService {
     // Giới hạn cache size (giữ tối đa 10 entries)
     if (_summaryCache.length > 10) {
       final oldestKey = _summaryCache.entries
-          .reduce((a, b) => a.value.createdAt.isBefore(b.value.createdAt) ? a : b)
+          .reduce((a, b) =>
+              a.value.createdAt.isBefore(b.value.createdAt) ? a : b)
           .key;
       _summaryCache.remove(oldestKey);
     }

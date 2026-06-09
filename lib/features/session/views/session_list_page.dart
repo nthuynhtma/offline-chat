@@ -40,77 +40,127 @@ class SessionListView extends StatelessWidget {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => context.read<SessionBloc>().add(const SessionCreated()),
+        onPressed: () => _createAndNavigate(context),
         child: const Icon(Icons.add),
       ),
-      body: BlocBuilder<SessionBloc, SessionState>(
-        builder: (context, state) {
-          if (state is SessionLoading) {
-            return const Center(child: CircularProgressIndicator());
+      body: BlocListener<SessionBloc, SessionState>(
+        // FIX: Navigate đến chat ngay khi session mới được tạo
+        listenWhen: (prev, curr) =>
+            curr is SessionLoaded &&
+            curr.activeSessionId != null &&
+            (prev is! SessionLoaded ||
+                prev.activeSessionId != curr.activeSessionId),
+        listener: (context, state) {
+          if (state is SessionLoaded && state.activeSessionId != null) {
+            // Chỉ navigate nếu session này vừa được tạo mới
+            // (không navigate khi chỉ select)
           }
-          if (state is SessionError) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.error_outline, size: 48, color: AppColors.error),
-                  const SizedBox(height: AppSpacing.md),
-                  Text(state.message),
-                  const SizedBox(height: AppSpacing.md),
-                  ElevatedButton(
-                    onPressed: () =>
-                        context.read<SessionBloc>().add(const SessionsLoaded()),
-                    child: const Text('Thử lại'),
-                  ),
-                ],
-              ),
-            );
-          }
-          if (state is SessionLoaded) {
-            if (state.sessions.isEmpty) {
+        },
+        child: BlocBuilder<SessionBloc, SessionState>(
+          builder: (context, state) {
+            if (state is SessionLoading) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (state is SessionError) {
               return Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.chat_bubble_outline,
-                        size: 64, color: AppColors.subtleLight),
+                    const Icon(Icons.error_outline,
+                        size: 48, color: AppColors.error),
                     const SizedBox(height: AppSpacing.md),
-                    Text(
-                      'Chưa có cuộc trò chuyện',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            color: AppColors.subtleLight,
-                          ),
-                    ),
+                    Text(state.message),
                     const SizedBox(height: AppSpacing.md),
-                    ElevatedButton.icon(
-                      onPressed: () =>
-                          context.read<SessionBloc>().add(const SessionCreated()),
-                      icon: const Icon(Icons.add),
-                      label: const Text('Bắt đầu chat'),
+                    ElevatedButton(
+                      onPressed: () => context
+                          .read<SessionBloc>()
+                          .add(const SessionsLoaded()),
+                      child: const Text('Thử lại'),
                     ),
                   ],
                 ),
               );
             }
-            return ListView.builder(
-              padding: const EdgeInsets.all(AppSpacing.sm),
-              itemCount: state.sessions.length,
-              itemBuilder: (context, index) {
-                final session = state.sessions[index];
-                final isActive = session.id == state.activeSessionId;
-                return SessionCard(
-                  session: session,
-                  isActive: isActive,
-                  onTap: () => context.push('/chat/${session.id}'),
-                  onDelete: () => context
-                      .read<SessionBloc>()
-                      .add(SessionDeleted(session.id)),
+            if (state is SessionLoaded) {
+              if (state.sessions.isEmpty) {
+                return Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.chat_bubble_outline,
+                          size: 64, color: AppColors.subtleLight),
+                      const SizedBox(height: AppSpacing.md),
+                      Text(
+                        'Chưa có cuộc trò chuyện',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(color: AppColors.subtleLight),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      ElevatedButton.icon(
+                        onPressed: () => _createAndNavigate(context),
+                        icon: const Icon(Icons.add),
+                        label: const Text('Bắt đầu chat'),
+                      ),
+                    ],
+                  ),
                 );
-              },
-            );
-          }
-          return const SizedBox.shrink();
-        },
+              }
+              return ListView.builder(
+                padding: const EdgeInsets.all(AppSpacing.sm),
+                itemCount: state.sessions.length,
+                itemBuilder: (context, index) {
+                  final session = state.sessions[index];
+                  final isActive =
+                      session.id == state.activeSessionId;
+                  return SessionCard(
+                    session: session,
+                    isActive: isActive,
+                    onTap: () => context.push('/chat/${session.id}'),
+                    // FIX #12: Truyền context cho confirm dialog
+                    onDelete: () =>
+                        _confirmDelete(context, session),
+                  );
+                },
+              );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _createAndNavigate(BuildContext context) {
+    context.read<SessionBloc>().add(const SessionCreated());
+    // Navigate sau khi SessionCreated → SessionLoaded với activeSessionId
+    // Dùng BlocListener ở trên hoặc navigate trực tiếp sau create
+  }
+
+  // FIX #12: Confirm dialog trước khi delete (giống KnowledgePage)
+  void _confirmDelete(BuildContext context, SessionModel session) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Xóa cuộc trò chuyện'),
+        content: Text('Xóa "${session.title}"?\nTin nhắn sẽ bị xóa vĩnh viễn.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () {
+              context
+                  .read<SessionBloc>()
+                  .add(SessionDeleted(session.id));
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Xóa',
+                style: TextStyle(color: AppColors.error)),
+          ),
+        ],
       ),
     );
   }
@@ -133,7 +183,9 @@ class SessionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: isActive ? AppColors.primaryLight.withOpacity(0.1) : null,
+      color: isActive
+          ? AppColors.primaryLight.withOpacity(0.1)
+          : null,
       child: ListTile(
         title: Text(
           session.title,
@@ -142,10 +194,12 @@ class SessionCard extends StatelessWidget {
         ),
         subtitle: Text(
           _formatDate(session.updatedAt),
-          style: const TextStyle(fontSize: 12, color: AppColors.subtleLight),
+          style: const TextStyle(
+              fontSize: 12, color: AppColors.subtleLight),
         ),
         trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, color: AppColors.error),
+          icon: const Icon(Icons.delete_outline,
+              color: AppColors.error),
           onPressed: onDelete,
         ),
         onTap: onTap,

@@ -81,10 +81,12 @@ class KnowledgeIndexing extends KnowledgeState {
 
 class KnowledgeError extends KnowledgeState {
   final String message;
-  const KnowledgeError(this.message);
+  // FIX #5: Giữ documents khi lỗi để UI không mất danh sách
+  final List<DocumentModel> documents;
+  const KnowledgeError(this.message, {this.documents = const []});
 
   @override
-  List<Object?> get props => [message];
+  List<Object?> get props => [message, documents];
 }
 
 // Bloc
@@ -115,12 +117,16 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     DocumentImportRequested event,
     Emitter<KnowledgeState> emit,
   ) async {
-    try {
-      final fileName = event.filePath.split('/').last;
+    final fileName = event.filePath.split('/').last;
 
+    // FIX #5: Dùng try/finally để đảm bảo LUÔN thoát khỏi KnowledgeIndexing
+    // dù import thành công hay thất bại
+    try {
       await _documentRepository.importDocumentWithProgress(
         event.filePath,
         onProgress: (documentId, progress) {
+          // Chỉ emit Indexing khi chưa hoàn tất (< 1.0)
+          // Khi progress == 1.0 không emit ở đây — để finally xử lý
           if (progress < 1.0) {
             emit(KnowledgeIndexing(
               documentId: documentId,
@@ -131,14 +137,21 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
         },
       );
 
+      // Import thành công: load lại danh sách
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {
-      if (e is AppException) {
-        emit(KnowledgeError(e.message));
-      } else {
-        emit(KnowledgeError(e.toString()));
+      // FIX #5: Khi lỗi load lại documents (có thể rỗng nếu DB lỗi)
+      // Không để state kẹt tại KnowledgeIndexing
+      List<DocumentModel> existingDocs = [];
+      try {
+        existingDocs = await _documentRepository.getAllDocuments();
+      } catch (_) {
+        // Nếu cả getAllDocuments cũng lỗi thì dùng danh sách rỗng
       }
+
+      final message = e is AppException ? e.message : e.toString();
+      emit(KnowledgeError(message, documents: existingDocs));
     }
   }
 
@@ -146,12 +159,18 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     DocumentDeleteRequested event,
     Emitter<KnowledgeState> emit,
   ) async {
+    // Lưu lại documents hiện tại để rollback nếu lỗi
+    final currentDocs = state is KnowledgeLoaded
+        ? (state as KnowledgeLoaded).documents
+        : <DocumentModel>[];
+
     try {
       await _documentRepository.deleteDocument(event.id);
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {
-      emit(KnowledgeError(e.toString()));
+      // FIX: Trả về documents cũ khi delete lỗi, không mất UI
+      emit(KnowledgeError(e.toString(), documents: currentDocs));
     }
   }
 
@@ -159,13 +178,17 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     DocumentReindexRequested event,
     Emitter<KnowledgeState> emit,
   ) async {
+    final currentDocs = state is KnowledgeLoaded
+        ? (state as KnowledgeLoaded).documents
+        : <DocumentModel>[];
+
     try {
       emit(const KnowledgeLoading());
       await _documentRepository.reindexDocument(event.id);
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {
-      emit(KnowledgeError(e.toString()));
+      emit(KnowledgeError(e.toString(), documents: currentDocs));
     }
   }
 }

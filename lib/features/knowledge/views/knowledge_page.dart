@@ -29,10 +29,24 @@ class KnowledgeView extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Knowledge Base'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: () => _pickAndImportFile(context),
-            tooltip: 'Import tài liệu',
+          // FIX: Disable import khi đang indexing
+          BlocBuilder<KnowledgeBloc, KnowledgeState>(
+            buildWhen: (prev, curr) =>
+                (prev is KnowledgeIndexing) != (curr is KnowledgeIndexing),
+            builder: (context, state) {
+              final isIndexing = state is KnowledgeIndexing;
+              return IconButton(
+                icon: Icon(
+                  Icons.add,
+                  color: isIndexing
+                      ? AppColors.subtleLight.withOpacity(0.4)
+                      : null,
+                ),
+                onPressed:
+                    isIndexing ? null : () => _pickAndImportFile(context),
+                tooltip: 'Import tài liệu',
+              );
+            },
           ),
         ],
       ),
@@ -49,24 +63,41 @@ class KnowledgeView extends StatelessWidget {
             );
           }
 
+          // FIX #5: KnowledgeError có documents → hiển thị list + error banner
           if (state is KnowledgeError) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.error_outline,
-                      size: 48, color: AppColors.error),
-                  const SizedBox(height: AppSpacing.md),
-                  Text(state.message),
-                  const SizedBox(height: AppSpacing.md),
-                  ElevatedButton(
-                    onPressed: () => context
-                        .read<KnowledgeBloc>()
-                        .add(const DocumentsLoaded()),
-                    child: const Text('Thử lại'),
-                  ),
-                ],
-              ),
+            if (state.documents.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.error_outline,
+                        size: 48, color: AppColors.error),
+                    const SizedBox(height: AppSpacing.md),
+                    Text(state.message, textAlign: TextAlign.center),
+                    const SizedBox(height: AppSpacing.md),
+                    ElevatedButton(
+                      onPressed: () => context
+                          .read<KnowledgeBloc>()
+                          .add(const DocumentsLoaded()),
+                      child: const Text('Thử lại'),
+                    ),
+                  ],
+                ),
+              );
+            }
+            // Có documents cũ: hiển thị chúng + error banner nhỏ
+            return Column(
+              children: [
+                _KnowledgeErrorBanner(
+                  message: state.message,
+                  onRetry: () => context
+                      .read<KnowledgeBloc>()
+                      .add(const DocumentsLoaded()),
+                ),
+                Expanded(
+                  child: _DocumentList(documents: state.documents),
+                ),
+              ],
             );
           }
 
@@ -102,12 +133,7 @@ class KnowledgeView extends StatelessWidget {
               );
             }
 
-            return ListView.builder(
-              padding: const EdgeInsets.all(AppSpacing.sm),
-              itemCount: state.documents.length,
-              itemBuilder: (context, index) =>
-                  _DocumentCard(doc: state.documents[index]),
-            );
+            return _DocumentList(documents: state.documents);
           }
 
           return const SizedBox.shrink();
@@ -132,6 +158,65 @@ class KnowledgeView extends StatelessWidget {
           .read<KnowledgeBloc>()
           .add(DocumentImportRequested(filePath));
     }
+  }
+}
+
+class _KnowledgeErrorBanner extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const _KnowledgeErrorBanner({
+    required this.message,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+      color: AppColors.error.withOpacity(0.1),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, size: 16, color: AppColors.error),
+          const SizedBox(width: AppSpacing.xs),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(fontSize: 12, color: AppColors.error),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(
+            onPressed: onRetry,
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.error,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('Thử lại', style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DocumentList extends StatelessWidget {
+  final List<DocumentModel> documents;
+  const _DocumentList({required this.documents});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      itemCount: documents.length,
+      itemBuilder: (context, index) =>
+          _DocumentCard(doc: documents[index]),
+    );
   }
 }
 

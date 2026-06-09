@@ -7,7 +7,6 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:offline_chat/core/constants/model_constants.dart';
 
-/// Trạng thái của một model
 enum ModelStatus {
   notDownloaded,
   downloading,
@@ -15,7 +14,6 @@ enum ModelStatus {
   error,
 }
 
-/// Thông tin chi tiết về model
 class ModelInfo {
   final String name;
   final String fileName;
@@ -88,25 +86,28 @@ abstract interface class ModelManagerService {
 
 class ModelManagerServiceImpl implements ModelManagerService {
   final FileDownloader _downloader = FileDownloader();
+
+  // BUG FIX 1: Dùng broadcast StreamController để nhiều listener có thể subscribe
+  // (ModelBloc _progressSubscription + bất kỳ listener nào khác)
   final _progressController = StreamController<ModelInfo>.broadcast();
 
   static const String _modelsDir = 'models';
 
   ModelInfo _gemmaInfo = const ModelInfo(
-    name: 'Gemma 4B IT',
+    name: 'Gemma 4E2B IT',
     fileName: kGemmaModelFileName,
     downloadUrl:
-        'https://huggingface.co/google/gemma-3-4b-it/resolve/main/gemma4b-it.litertlm',
-    fileSizeBytes: 2800000000, // ~2.8GB
-    checksumSha256: null, // Hugging Face không cung cấp checksum công khai
+        'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm',
+    fileSizeBytes: 2000000000,
+    checksumSha256: null,
   );
 
   ModelInfo _geckoInfo = const ModelInfo(
-    name: 'Gecko 110M',
+    name: 'Gecko 110M (256-Quant)',
     fileName: kGeckoModelFileName,
     downloadUrl:
-        'https://storage.googleapis.com/mediapipe-models/text_embedder/text_embedder/gecko_110m.tflite',
-    fileSizeBytes: 440000000, // ~440MB
+        'https://huggingface.co/litert-community/Gecko-110m-en/resolve/main/Gecko_256_quant.tflite',
+    fileSizeBytes: 111531712,
     checksumSha256: null,
   );
 
@@ -150,11 +151,15 @@ class ModelManagerServiceImpl implements ModelManagerService {
     final gemmaPath = p.join(_modelsDirectory!, kGemmaModelFileName);
     final geckoPath = p.join(_modelsDirectory!, kGeckoModelFileName);
 
-    if (await File(gemmaPath).exists()) {
-      _gemmaInfo = _gemmaInfo.copyWith(status: ModelStatus.downloaded);
+    if (await File(gemmaPath).exists() &&
+        await isModelFileValid(kGemmaModelFileName)) {
+      _gemmaInfo =
+          _gemmaInfo.copyWith(status: ModelStatus.downloaded, progress: 1.0);
     }
-    if (await File(geckoPath).exists()) {
-      _geckoInfo = _geckoInfo.copyWith(status: ModelStatus.downloaded);
+    if (await File(geckoPath).exists() &&
+        await isModelFileValid(kGeckoModelFileName)) {
+      _geckoInfo =
+          _geckoInfo.copyWith(status: ModelStatus.downloaded, progress: 1.0);
     }
   }
 
@@ -193,12 +198,13 @@ class ModelManagerServiceImpl implements ModelManagerService {
       filename: modelInfo.fileName,
       directory: _modelsDir,
       baseDirectory: BaseDirectory.applicationDocuments,
-      allowPause: true, // Cho phép resume, giải quyết Android 9-min limit
+      allowPause: true,
       retries: 3,
       updates: Updates.statusAndProgress,
-      requiresWiFi: false, // Cho phép tải bằng data
+      requiresWiFi: false,
     );
 
+    // Emit trạng thái bắt đầu download ngay lập tức
     onUpdate(modelInfo.copyWith(
       status: ModelStatus.downloading,
       progress: 0.0,
@@ -206,28 +212,29 @@ class ModelManagerServiceImpl implements ModelManagerService {
     ));
 
     try {
-      // Dùng onProgress và onStatus callbacks thay vì stream listener
-      // (theo đúng api_contracts.md pattern)
       await _downloader.download(
         task,
         onProgress: (progress) {
-          final p = progress / 100.0;
+          // BUG FIX 2: background_downloader trả về 0.0..1.0, KHÔNG phải 0..100
+          // Code cũ: final p = progress / 100.0 → luôn ra ~0% vì 0.5/100 = 0.005
+          // Fix: dùng trực tiếp, clamp để an toàn
+          final normalizedProgress = progress.clamp(0.0, 1.0);
           onUpdate(modelInfo.copyWith(
             status: ModelStatus.downloading,
-            progress: p,
+            progress: normalizedProgress,
           ));
         },
         onStatus: (status) async {
           if (status == TaskStatus.complete) {
-            // Verify file tồn tại
-            final modelPath = p.join(_modelsDirectory!, modelInfo.fileName);
+            final modelPath =
+                p.join(_modelsDirectory!, modelInfo.fileName);
             final file = File(modelPath);
 
             if (await file.exists()) {
-              // Verify kích thước (xấp xỉ)
               final actualSize = await file.length();
-              final sizeOk = (actualSize - modelInfo.fileSizeBytes).abs() <
-                  1024 * 1024; // tolerance 1MB
+              final sizeOk =
+                  (actualSize - modelInfo.fileSizeBytes).abs() <
+                      5 * 1024 * 1024;
 
               if (sizeOk) {
                 onUpdate(modelInfo.copyWith(
@@ -259,6 +266,14 @@ class ModelManagerServiceImpl implements ModelManagerService {
               errorMessage: 'Download thất bại',
             ));
           }
+          // BUG FIX 3: Các status trung gian (enqueued, running, waitingToRetry,
+          // paused) không cần xử lý nhưng KHÔNG được silent-drop khi là paused
+          else if (status == TaskStatus.paused) {
+            onUpdate(modelInfo.copyWith(
+              status: ModelStatus.downloading, // vẫn giữ UI downloading
+              // progress giữ nguyên giá trị cuối cùng
+            ));
+          }
         },
       );
     } catch (e) {
@@ -271,8 +286,6 @@ class ModelManagerServiceImpl implements ModelManagerService {
 
   @override
   Future<void> cancelDownload(String fileName) async {
-    // background_downloader hỗ trợ cancel qua task id
-    // Vì không lưu taskId, ta cancel tất cả tasks đang chạy
     await _downloader.cancelAll();
   }
 
@@ -288,7 +301,7 @@ class ModelManagerServiceImpl implements ModelManagerService {
         ? _gemmaInfo.fileSizeBytes
         : _geckoInfo.fileSizeBytes;
 
-    return (size - expectedSize).abs() < 1024 * 1024; // tolerance 1MB
+    return (size - expectedSize).abs() < 5 * 1024 * 1024;
   }
 
   @override
@@ -309,7 +322,6 @@ class ModelManagerServiceImpl implements ModelManagerService {
     }
   }
 
-  /// Dispose stream subscription
   void dispose() {
     _progressController.close();
   }

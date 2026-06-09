@@ -28,7 +28,7 @@ dependencies:
   flutter_bloc: ^9.1.1
 
   # AI
-  flutter_gemma: ^0.13.5
+  flutter_gemma: ^0.16.4
 
   # DI
   get_it: ^9.2.1
