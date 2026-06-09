@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:offline_chat/core/errors/app_exception.dart';
 
@@ -8,24 +10,50 @@ abstract interface class GemmaService {
   Future<void> initialize({String? modelPath, int maxTokens = 1024});
   bool get isReady;
   Future<void> dispose();
+
+  /// Legacy: full prompt (Gemma format) → new session → generate → close session.
   Stream<String> generateStream(String prompt);
   Future<String> generate(String prompt);
+
+  // ─── Session-based API (turn-based, giữ session giữa các request) ─────
+
+  /// Tạo session mới với [systemInstruction].
+  /// Các message cũ (nếu có) cần được add qua [addHistoryMessage] trước.
+  Future<void> createSession({String? systemInstruction});
+
+  /// Add một message lịch sử vào session hiện tại.
+  /// Dùng khi replay history từ DB khi mở chat page.
+  Future<void> addHistoryMessage(String role, String content);
+
+  /// Generate stream response từ session hiện tại.
+  /// Chỉ add user message mới, không gửi lại toàn bộ history.
+  Stream<String> generateWithSession(String userMessage);
+
+  /// Đóng session hiện tại.
+  Future<void> closeSession();
+
+  /// Session hiện tại có sẵn sàng không.
+  bool get hasActiveSession;
 }
 
-/// Implementation wrapping flutter_gemma package v0.13.x modern API.
+/// Implementation wrapping flutter_gemma package v0.16.x modern API.
 ///
-/// Uses the FlutterGemma facade:
-/// - `FlutterGemma.getActiveModel()` to get InferenceModel
-/// - `InferenceModel.createSession()` to create a session
+/// Hỗ trợ 2 chế độ:
+/// 1. Legacy (prompt-based): generateStream() / generate() — tạo session mới mỗi lần
+/// 2. Session-based: createSession() + generateWithSession() — giữ session dài hạn
 ///
-/// Note: Due to abstract interface nature, dynamic dispatch is used
-/// for methods that may vary between implementations.
-/// TODO: Update with concrete type info when available.
+/// API model (v0.16.x): turn-based chat
+/// 1. createSession() → session.addQueryChunk(Message) → session.getResponseAsync()
+/// 2. Session được giữ lại, chỉ add user message mới cho các turn tiếp theo
 class GemmaServiceImpl implements GemmaService {
   InferenceModel? _model;
+  InferenceModelSession? _session;
 
   @override
   bool get isReady => _model != null;
+
+  @override
+  bool get hasActiveSession => _session != null;
 
   @override
   Future<void> initialize({String? modelPath, int maxTokens = 1024}) async {
@@ -45,31 +73,33 @@ class GemmaServiceImpl implements GemmaService {
       );
     } catch (e) {
       if (e is StateError || e is ArgumentError) {
-        throw const ModelNotLoadedException();
+        throw ModelNotLoadedException(message: e.toString());
       }
       rethrow;
     }
   }
 
+  // ─── Legacy prompt-based API ──────────────────────────────────────────
+
   @override
   Stream<String> generateStream(String prompt) async* {
     if (_model == null) throw const ModelNotLoadedException();
-    // ignore: avoid_dynamic_calls
-    final session = await (_model as dynamic).createSession();
+
+    final session = await _model!.createSession();
     try {
-      // ignore: avoid_dynamic_calls
-      await for (final response in session.getResponseAsync(prompt)) {
-        String text;
-        if (response is String) {
-          text = response;
-        } else {
-          // ignore: avoid_dynamic_calls
-          text = response.text as String? ?? response.toString();
-        }
-        yield text;
+      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
+
+      final stream = session.getResponseAsync().timeout(
+        const Duration(seconds: 120),
+        onTimeout: (sink) {
+          sink.addError(const ModelTimeoutException());
+          sink.close();
+        },
+      );
+      await for (final response in stream) {
+        yield response;
       }
     } finally {
-      // ignore: avoid_dynamic_calls
       session.close();
     }
   }
@@ -77,24 +107,95 @@ class GemmaServiceImpl implements GemmaService {
   @override
   Future<String> generate(String prompt) async {
     if (_model == null) throw const ModelNotLoadedException();
-    // ignore: avoid_dynamic_calls
-    final session = await (_model as dynamic).createSession();
+
+    final session = await _model!.createSession();
     try {
-      // ignore: avoid_dynamic_calls
-      final response = await session.getResponse(prompt);
-      if (response is String) {
-        return response;
-      }
-      // ignore: avoid_dynamic_calls
-      return (response.text as String?) ?? response.toString();
+      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
+
+      final response = await session.getResponse().timeout(
+        const Duration(seconds: 120),
+        onTimeout: () => throw const ModelTimeoutException(),
+      );
+      return response;
     } finally {
-      // ignore: avoid_dynamic_calls
       session.close();
     }
   }
 
+  // ─── Session-based API ────────────────────────────────────────────────
+
+  @override
+  Future<void> createSession({String? systemInstruction}) async {
+    if (_model == null) throw const ModelNotLoadedException();
+
+    // Đóng session cũ nếu có
+    await _closeSessionInternal();
+
+    _session = await _model!.createSession(
+      systemInstruction: systemInstruction,
+    );
+  }
+
+  @override
+  Future<void> addHistoryMessage(String role, String content) async {
+    if (_session == null) {
+      // Tự động tạo session nếu chưa có
+      await createSession();
+    }
+
+    await _session!.addQueryChunk(
+      Message.text(
+        text: content,
+        isUser: role == 'user',
+      ),
+    );
+  }
+
+  @override
+  Stream<String> generateWithSession(String userMessage) async* {
+    if (_model == null) throw const ModelNotLoadedException();
+    if (_session == null) throw const ModelNotLoadedException();
+
+    try {
+      // Add user message vào session
+      await _session!.addQueryChunk(
+        Message.text(text: userMessage, isUser: true),
+      );
+
+      final stream = _session!.getResponseAsync().timeout(
+        const Duration(seconds: 120),
+        onTimeout: (sink) {
+          sink.addError(const ModelTimeoutException());
+          sink.close();
+        },
+      );
+      await for (final response in stream) {
+        yield response;
+      }
+    } catch (e) {
+      // Nếu session bị lỗi, đóng và tạo lại cho lần sau
+      await _closeSessionInternal();
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> closeSession() async {
+    await _closeSessionInternal();
+  }
+
+  Future<void> _closeSessionInternal() async {
+    try {
+      await _session?.close();
+    } catch (_) {
+      // Silent close
+    }
+    _session = null;
+  }
+
   @override
   Future<void> dispose() async {
+    await _closeSessionInternal();
     _model = null;
   }
 }

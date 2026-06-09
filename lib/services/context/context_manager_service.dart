@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
@@ -69,21 +71,25 @@ class ContextManagerService {
     if (totalHistoryTokens > summaryThreshold &&
         _gemmaService != null &&
         _gemmaService!.isReady) {
-      try {
-        summary = await _summarizeHistory(history, sessionId);
-        // Giữ lại N messages gần nhất sau summary
+      // 1. Kiểm tra cache trước — không block nếu chưa có
+      final cacheKey = '${sessionId}_${history.length}_${history.lastOrNull?.id}';
+      final cached = _summaryCache[cacheKey];
+
+      if (cached != null) {
+        // Có cache → dùng ngay, không cần đợi summarize
+        summary = cached.summary;
+        // Giữ lại N messages gần nhất
         if (history.length > recentMessagesAfterSummary) {
-          history = history.sublist(
-              history.length - recentMessagesAfterSummary);
+          history = history.sublist(history.length - recentMessagesAfterSummary);
         }
-        // FIX #7: Tính đúng tokens của history còn lại sau khi trim
         totalHistoryTokens = 0;
         for (final msg in history) {
           totalHistoryTokens += _estimateTokens(msg.content);
         }
-      } catch (_) {
-        summary = null;
-        // totalHistoryTokens vẫn giữ giá trị gốc → fallback trim bên dưới
+      } else {
+        // Chưa có cache → chạy summarize background, không block
+        // Dùng tạm trim history cho request hiện tại
+        unawaited(_summarizeHistory(history, sessionId));
       }
     }
 
@@ -123,54 +129,54 @@ class ContextManagerService {
     );
   }
 
-  /// Summarize lịch sử chat bằng Gemma
-  Future<String> _summarizeHistory(
+  /// Summarize lịch sử chat bằng Gemma — chạy background, không blocking.
+  /// Kết quả được lưu vào cache và dùng cho request tiếp theo.
+  Future<void> _summarizeHistory(
     List<MessageModel> history,
     String sessionId,
   ) async {
-    // Kiểm tra cache
     final cacheKey = '${sessionId}_${history.length}_${history.lastOrNull?.id}';
-    final cached = _summaryCache[cacheKey];
-    if (cached != null) {
-      return cached.summary;
+    // Cache hit → không cần chạy lại
+    if (_summaryCache.containsKey(cacheKey)) return;
+
+    try {
+      // Xây dựng prompt summarize
+      final buffer = StringBuffer();
+      buffer.writeln('<start_of_turn>system');
+      buffer.writeln(
+        'Summarize the conversation history concisely in Vietnamese. '
+        'Keep only the key information, topics discussed, and user preferences. '
+        'Max 100 words.',
+      );
+      buffer.writeln('<end_of_turn>');
+      buffer.writeln('<start_of_turn>user');
+      buffer.writeln('Conversation history:');
+      for (final msg in history) {
+        buffer.writeln('${msg.role.name}: ${msg.content}');
+      }
+      buffer.writeln('<end_of_turn>');
+      buffer.write('<start_of_turn>model\n');
+
+      final response = await _gemmaService!.generate(buffer.toString());
+
+      // Cache summary
+      _summaryCache[cacheKey] = _SummaryCache(
+        summary: response.trim(),
+        estimatedTokens: _estimateTokens(response),
+        createdAt: DateTime.now(),
+      );
+
+      // Giới hạn cache size (giữ tối đa 10 entries)
+      if (_summaryCache.length > 10) {
+        final oldestKey = _summaryCache.entries
+            .reduce((a, b) =>
+                a.value.createdAt.isBefore(b.value.createdAt) ? a : b)
+            .key;
+        _summaryCache.remove(oldestKey);
+      }
+    } catch (_) {
+      // Silent fail — summarize background fail không ảnh hưởng request chính
     }
-
-    // Xây dựng prompt summarize
-    final buffer = StringBuffer();
-    buffer.writeln('<start_of_turn>system');
-    buffer.writeln(
-      'Summarize the conversation history concisely in Vietnamese. '
-      'Keep only the key information, topics discussed, and user preferences. '
-      'Max 100 words.',
-    );
-    buffer.writeln('<end_of_turn>');
-    buffer.writeln('<start_of_turn>user');
-    buffer.writeln('Conversation history:');
-    for (final msg in history) {
-      buffer.writeln('${msg.role.name}: ${msg.content}');
-    }
-    buffer.writeln('<end_of_turn>');
-    buffer.write('<start_of_turn>model\n');
-
-    final response = await _gemmaService!.generate(buffer.toString());
-
-    // Cache summary
-    _summaryCache[cacheKey] = _SummaryCache(
-      summary: response.trim(),
-      estimatedTokens: _estimateTokens(response),
-      createdAt: DateTime.now(),
-    );
-
-    // Giới hạn cache size (giữ tối đa 10 entries)
-    if (_summaryCache.length > 10) {
-      final oldestKey = _summaryCache.entries
-          .reduce((a, b) =>
-              a.value.createdAt.isBefore(b.value.createdAt) ? a : b)
-          .key;
-      _summaryCache.remove(oldestKey);
-    }
-
-    return response.trim();
   }
 
   int _estimateTokens(String text) {

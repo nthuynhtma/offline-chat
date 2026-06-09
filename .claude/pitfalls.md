@@ -17,12 +17,12 @@ add(ModelInitializationRequested(path));
 ### Pitfall: Session không được đóng
 ```dart
 // ❌ SAI - memory leak
-final session = await InferenceModel.createSession(model);
-final stream = session.getResponseAsync(prompt);
+final session = await model.createSession();
+final stream = session.getResponseAsync();  // no arguments in v0.16.x
 // Quên close()
 
 // ✅ ĐÚNG
-final session = await InferenceModel.createSession(model);
+final session = await model.createSession();
 try {
   // use session
 } finally {

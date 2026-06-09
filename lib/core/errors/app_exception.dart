@@ -4,8 +4,13 @@ sealed class AppException implements Exception {
 }
 
 class ModelNotLoadedException extends AppException {
-  const ModelNotLoadedException()
-      : super('AI model chưa được tải. Vui lòng tải model trước.');
+  const ModelNotLoadedException({String? message})
+      : super(message ?? 'AI model chưa được tải. Vui lòng tải model trước.');
+}
+
+class ModelTimeoutException extends AppException {
+  const ModelTimeoutException()
+      : super('Model AI phản hồi quá lâu. Vui lòng thử lại.');
 }
 
 class InsufficientMemoryException extends AppException {

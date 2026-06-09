@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
@@ -11,14 +12,16 @@ import 'package:offline_chat/core/constants/model_constants.dart';
 class _ProgressUpdate extends ModelEvent {
   final ModelInfo gemmaInfo;
   final ModelInfo geckoInfo;
+  final bool tokenizerDownloaded;
 
   const _ProgressUpdate({
     required this.gemmaInfo,
     required this.geckoInfo,
+    this.tokenizerDownloaded = false,
   });
 
   @override
-  List<Object?> get props => [gemmaInfo, geckoInfo];
+  List<Object?> get props => [gemmaInfo, geckoInfo, tokenizerDownloaded];
 }
 
 // ─── Public events ────────────────────────────────────────────────────────────
@@ -114,13 +117,23 @@ class ModelError extends ModelState {
 
 class ModelBloc extends Bloc<ModelEvent, ModelState> {
   final ModelManagerService _modelManager;
-
-  // FIX: Inject GemmaService & GeckoService để gọi initialize() sau download.
-  // ModelBloc là nơi duy nhất biết khi nào file đã sẵn sàng trên disk.
   final GemmaService _gemmaService;
   final GeckoService _geckoService;
 
   StreamSubscription<ModelInfo>? _progressSubscription;
+  bool _tokenizerDownloaded = false;
+
+  /// Completer hoàn thành khi Gemma init xong (thành công hoặc thất bại).
+  /// ChatPage có thể dùng để biết init đã chạy xong chưa.
+  Completer<bool>? _gemmaInitCompleter;
+
+  /// true khi đang chạy _tryInitializeGemma()
+  bool get isInitializingGemma =>
+      _gemmaInitCompleter != null && !_gemmaInitCompleter!.isCompleted;
+
+  /// Future hoàn thành khi Gemma init xong. true = thành công.
+  Future<bool> get gemmaInitResult =>
+      _gemmaInitCompleter?.future ?? Future.value(false);
 
   ModelBloc({
     required ModelManagerService modelManager,
@@ -153,15 +166,19 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       final geckoDownloaded =
           _modelManager.geckoInfo.status == ModelStatus.downloaded;
 
-      // FIX: Nếu file đã có sẵn trên disk (app restart sau lần download trước),
-      // khởi tạo service ngay — không đợi download event.
       bool gemmaReady = _gemmaService.isReady;
       bool geckoReady = _geckoService.isReady;
 
       if (gemmaDownloaded && !gemmaReady) {
+        // Tạo Completer trước khi init để ChatPage biết đang chạy
+        _gemmaInitCompleter = Completer<bool>();
         gemmaReady = await _tryInitializeGemma();
+        _gemmaInitCompleter!.complete(gemmaReady);
       }
       if (geckoDownloaded && !geckoReady) {
+        final tokenizerValid =
+            await _modelManager.isModelFileValid(kGeckoTokenizerFileName);
+        _tokenizerDownloaded = tokenizerValid;
         geckoReady = await _tryInitializeGecko();
       }
 
@@ -172,6 +189,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
         geckoReady: geckoReady,
       ));
     } catch (e) {
+      _gemmaInitCompleter?.complete(false);
       emit(ModelError(e.toString()));
     }
   }
@@ -182,8 +200,6 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   ) async {
     _listenToProgress();
 
-    // Fire-and-forget: download chạy dài (2.4 GB), không await để không
-    // block Bloc event queue → _ProgressUpdate events được xử lý realtime.
     _modelManager.downloadGemma().catchError((e) {
       add(_ProgressUpdate(
         gemmaInfo: _modelManager.gemmaInfo.copyWith(
@@ -217,10 +233,8 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
         ),
       ));
     });
-    // Đồng thời download tokenizer (SentencePiece model)
-    _modelManager.downloadGeckoTokenizer().catchError((_) {
-      // Tokenizer download failure không block model usage
-    });
+    _tokenizerDownloaded = false;
+    _modelManager.downloadGeckoTokenizer().catchError((_) {});
 
     emit(ModelLoaded(
       gemmaInfo: _modelManager.gemmaInfo,
@@ -255,12 +269,13 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     bool gemmaReady = _gemmaService.isReady;
     bool geckoReady = _geckoService.isReady;
 
-    // FIX: Đây là nơi duy nhất cần gọi initialize() cho service.
-    // Khi download hoàn tất → file đã trên disk → gọi ngay.
     if (event.gemmaInfo.status == ModelStatus.downloaded && !gemmaReady) {
       gemmaReady = await _tryInitializeGemma();
     }
-    if (event.geckoInfo.status == ModelStatus.downloaded && !geckoReady) {
+
+    if (event.geckoInfo.status == ModelStatus.downloaded &&
+        event.tokenizerDownloaded &&
+        !geckoReady) {
       geckoReady = await _tryInitializeGecko();
     }
 
@@ -274,26 +289,29 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
-  /// Gọi GemmaService.initialize(). Trả về true nếu thành công.
-  /// flutter_gemma tự detect model qua native layer — không cần truyền path.
   Future<bool> _tryInitializeGemma() async {
-  try {
-    final path = await _modelManager.getModelPath(kGemmaModelFileName);
-    await _gemmaService.initialize(modelPath: path); // truyền path
-    return _gemmaService.isReady;
-  } catch (_) {
-    return false;
+    try {
+      final path = await _modelManager.getModelPath(kGemmaModelFileName);
+      await _gemmaService.initialize(modelPath: path);
+      return _gemmaService.isReady;
+    } catch (_) {
+      return false;
+    }
   }
-}
 
-  /// Gọi GeckoService.registerModel() + initialize() qua flutter_gemma API.
-  /// Cần cả model TFLite và tokenizer SentencePiece trên disk.
   Future<bool> _tryInitializeGecko() async {
     try {
       final modelPath =
           await _modelManager.getModelPath(kGeckoModelFileName);
       final tokenizerPath =
           await _modelManager.getModelPath(kGeckoTokenizerFileName);
+
+      final modelFile = File(modelPath);
+      final tokenizerFile = File(tokenizerPath);
+      if (!await modelFile.exists() || !await tokenizerFile.exists()) {
+        return false;
+      }
+
       await _geckoService.registerModel(
         modelPath: modelPath,
         tokenizerPath: tokenizerPath,
@@ -306,15 +324,23 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   }
 
   void _listenToProgress() {
-    // Hủy subscription cũ trước khi tạo mới — tránh duplicate listeners
     _progressSubscription?.cancel();
     _progressSubscription = _modelManager.progressStream.listen((info) {
       final currentGemma = _modelManager.gemmaInfo;
       final currentGecko = _modelManager.geckoInfo;
 
+      if (info.fileName == kGeckoTokenizerFileName) {
+        if (info.status == ModelStatus.downloaded) {
+          _tokenizerDownloaded = true;
+        } else if (info.status == ModelStatus.error) {
+          _tokenizerDownloaded = false;
+        }
+      }
+
       add(_ProgressUpdate(
         gemmaInfo: info.fileName == currentGemma.fileName ? info : currentGemma,
         geckoInfo: info.fileName == currentGecko.fileName ? info : currentGecko,
+        tokenizerDownloaded: _tokenizerDownloaded,
       ));
     });
   }

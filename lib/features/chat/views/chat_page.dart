@@ -7,7 +7,9 @@ import 'package:offline_chat/database/tables/messages_table.dart';
 import 'package:offline_chat/features/chat/bloc/chat_bloc.dart';
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/views/message_bubble.dart';
+import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/injection/service_locator.dart';
+import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 
 class ChatPage extends StatelessWidget {
   final String sessionId;
@@ -23,9 +25,106 @@ class ChatPage extends StatelessWidget {
   }
 }
 
-class ChatView extends StatelessWidget {
+/// Quản lý dialog loading model khi vào màn hình chat.
+/// Dùng StatefulWidget để có lifecycle initState/dispose cho dialog.
+class ChatView extends StatefulWidget {
   final String sessionId;
   const ChatView({required this.sessionId, super.key});
+
+  @override
+  State<ChatView> createState() => _ChatViewState();
+}
+
+class _ChatViewState extends State<ChatView> {
+  @override
+  void initState() {
+    super.initState();
+    // Kiểm tra trạng thái model ngay sau khi build frame đầu tiên
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkModelAndShowDialog(context);
+    });
+  }
+
+  void _checkModelAndShowDialog(BuildContext context) {
+    if (!mounted) return;
+
+    final modelBloc = context.read<ModelBloc>();
+    final modelState = modelBloc.state;
+
+    if (modelState is ModelLoaded) {
+      final isDownloaded =
+          modelState.gemmaInfo.status == ModelStatus.downloaded;
+
+      // Nếu model chưa download → ChatBloc sẽ emit ChatError.needsModelDownload
+      // → banner warning xử lý, không cần dialog
+      if (!isDownloaded) return;
+      if (modelState.gemmaReady) return; // Đã sẵn sàng rồi
+
+      // Nếu init chưa từng chạy hoặc đã fail → dispatch StatusChecked để retry
+      if (!modelBloc.isInitializingGemma) {
+        modelBloc.add(const StatusChecked());
+      }
+
+      // Show dialog loading — BlocListener bên trong sẽ tự đóng khi gemmaReady
+      _showLoadingDialog();
+    } else if (modelState is ModelLoading) {
+      // ModelBloc đang loading → chờ init xong
+    }
+  }
+
+  void _showLoadingDialog() {
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return BlocListener<ModelBloc, ModelState>(
+          listener: (context, state) {
+            if (state is ModelLoaded && state.gemmaReady) {
+              Navigator.of(context).pop();
+              context.read<ChatBloc>().add(const ModelBecameReady());
+            }
+            if (state is ModelError) {
+              Navigator.of(context).pop();
+            }
+          },
+          child: AlertDialog(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.lg,
+              vertical: AppSpacing.lg,
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: CircularProgressIndicator(strokeWidth: 3),
+                ),
+                const SizedBox(height: AppSpacing.lg),
+                const Text(
+                  'Đang nạp model AI vào bộ nhớ...',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                  'Model Gemma (2.8GB) đang được load. '
+                  'Vui lòng đợi trong giây lát.',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: AppColors.subtleLight,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -37,196 +136,272 @@ class ChatView extends StatelessWidget {
         ),
         title: const Text('Chat'),
         actions: [
-          // FIX #11: Disable delete button khi đang streaming
-          BlocBuilder<ChatBloc, ChatState>(
-            buildWhen: (prev, curr) => (prev is ChatStreaming) != (curr is ChatStreaming),
-            builder: (context, state) {
-              final isStreaming = state is ChatStreaming;
-              return IconButton(
-                icon: Icon(
-                  Icons.delete_outline,
-                  color: isStreaming ? AppColors.subtleLight.withOpacity(0.4) : null,
-                ),
-                onPressed: isStreaming
-                    ? null
-                    : () => showDialog(
-                          context: context,
-                          builder: (ctx) => AlertDialog(
-                            title: const Text('Xóa tin nhắn'),
-                            content: const Text('Xóa toàn bộ tin nhắn trong cuộc trò chuyện này?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(ctx).pop(),
-                                child: const Text('Hủy'),
-                              ),
-                              TextButton(
-                                onPressed: () {
-                                  context.read<ChatBloc>().add(const MessagesCleared());
-                                  Navigator.of(ctx).pop();
-                                },
-                                child: const Text('Xóa', style: TextStyle(color: AppColors.error)),
-                              ),
-                            ],
-                          ),
-                        ),
-              );
-            },
-          ),
+          _ClearButton(sessionId: widget.sessionId),
         ],
       ),
       body: Column(
         children: [
-          // FIX #2: buildWhen đúng — rebuild khi chuyển vào/ra ChatError.needsModelDownload
-          BlocBuilder<ChatBloc, ChatState>(
-            buildWhen: (prev, curr) {
-              final prevNeeds = prev is ChatError && prev.needsModelDownload;
-              final currNeeds = curr is ChatError && curr.needsModelDownload;
-              return prevNeeds != currNeeds;
-            },
-            builder: (context, state) {
-              if (state is ChatError && state.needsModelDownload) {
-                return Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(AppSpacing.sm),
-                  color: AppColors.warning.withOpacity(0.2),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.warning_amber, color: AppColors.warning),
-                      const SizedBox(width: AppSpacing.sm),
-                      const Expanded(
-                        child: Text('Model AI chưa được tải'),
-                      ),
-                      TextButton(
-                        onPressed: () => context.push('/settings/models'),
-                        child: const Text('Tải'),
-                      ),
-                    ],
-                  ),
-                );
-              }
-              return const SizedBox.shrink();
-            },
-          ),
-          // Messages
+          // ─── Banner "Chưa tải model" ──────────────────────────────────
+          _ModelNotInstalledBanner(),
+
+          // Chat body (loading / error / messages)
           Expanded(
-            child: BlocBuilder<ChatBloc, ChatState>(
-              builder: (context, state) {
-                if (state is ChatLoading) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                // FIX #2: ChatError có thể có messages → hiển thị chúng + error toast
-                // Không còn trả về full-screen error khi có messages
-                if (state is ChatError && !state.needsModelDownload) {
-                  if (state.messages.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.error_outline, size: 48, color: AppColors.error),
-                          const SizedBox(height: AppSpacing.md),
-                          Text(state.message),
-                          const SizedBox(height: AppSpacing.md),
-                          ElevatedButton(
-                            onPressed: () => context.read<ChatBloc>().add(SessionInitialized(sessionId)),
-                            child: const Text('Thử lại'),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-                  // Có messages: hiển thị list + error banner nhỏ phía trên
-                  return Column(
-                    children: [
-                      _ErrorBanner(message: state.message),
-                      Expanded(
-                        child: _MessageList(
-                          messages: state.messages,
-                          sessionId: sessionId,
-                        ),
-                      ),
-                    ],
-                  );
-                }
-
-                List<MessageModel> messages = [];
-                String? streamingText;
-                String? streamingId;
-
-                if (state is ChatLoaded) {
-                  messages = state.messages;
-                } else if (state is ChatStreaming) {
-                  messages = state.messages;
-                  streamingText = state.streamingText;
-                  streamingId = state.streamingId;
-                }
-
-                if (messages.isEmpty && streamingText == null) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.chat_bubble_outline, size: 64, color: AppColors.subtleLight),
-                        const SizedBox(height: AppSpacing.md),
-                        const Text(
-                          'Bắt đầu cuộc trò chuyện',
-                          style: TextStyle(color: AppColors.subtleLight),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-
-                return _MessageList(
-                  messages: messages,
-                  sessionId: sessionId,
-                  streamingText: streamingText,
-                  streamingId: streamingId,
-                );
-              },
-            ),
+            child: _ChatBody(sessionId: widget.sessionId),
           ),
+
           // Input bar
-          ChatInputBar(sessionId: sessionId),
+          ChatInputBar(sessionId: widget.sessionId),
         ],
       ),
     );
   }
 }
 
-// Widget riêng để tránh code duplicate
+// ─────────────────────────────────────────────────────────────────────────────
+// Widget con riêng — mỗi widget chỉ rebuild khi state liên quan thay đổi
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Banner hiển thị khi model chưa được tải.
+class _ModelNotInstalledBanner extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<ChatBloc, ChatState>(
+      buildWhen: (prev, curr) {
+        final prevNeeds = prev is ChatError && prev.needsModelDownload;
+        final currNeeds = curr is ChatError && curr.needsModelDownload;
+        return prevNeeds != currNeeds;
+      },
+      builder: (context, state) {
+        if (state is ChatError && state.needsModelDownload) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(AppSpacing.sm),
+            color: AppColors.warning.withOpacity(0.2),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber, color: AppColors.warning),
+                const SizedBox(width: AppSpacing.sm),
+                const Expanded(child: Text('Model AI chưa được tải')),
+                TextButton(
+                  onPressed: () => context.push('/settings/models'),
+                  child: const Text('Tải'),
+                ),
+              ],
+            ),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
+
+/// Nút xoá trong app bar (chỉ rebuild khi trạng thái streaming thay đổi).
+class _ClearButton extends StatelessWidget {
+  final String sessionId;
+  const _ClearButton({required this.sessionId});
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<ChatBloc, ChatState>(
+      buildWhen: (prev, curr) =>
+          (prev is ChatStreaming) != (curr is ChatStreaming),
+      builder: (context, state) {
+        final isStreaming = state is ChatStreaming;
+        return IconButton(
+          icon: Icon(
+            Icons.delete_outline,
+            color: isStreaming
+                ? AppColors.subtleLight.withOpacity(0.4)
+                : null,
+          ),
+          onPressed: isStreaming
+              ? null
+              : () => showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Xóa tin nhắn'),
+                      content: const Text(
+                        'Xóa toàn bộ tin nhắn trong cuộc trò chuyện này?',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          child: const Text('Hủy'),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            context.read<ChatBloc>().add(const MessagesCleared());
+                            Navigator.of(ctx).pop();
+                          },
+                          child: const Text(
+                            'Xóa',
+                            style: TextStyle(color: AppColors.error),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+        );
+      },
+    );
+  }
+}
+
+/// Body chính của chat: hiển thị loading / error / messages dựa trên ChatState.
+class _ChatBody extends StatelessWidget {
+  final String sessionId;
+  const _ChatBody({required this.sessionId});
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<ChatBloc, ChatState>(
+      buildWhen: (prev, curr) {
+        // Chỉ rebuild khi state type thay đổi (Loading → Loaded → Streaming → Error)
+        // KHÔNG rebuild khi streamingText thay đổi (đã xử lý riêng trong _MessageList)
+        if (curr is ChatStreaming && prev is ChatStreaming) return false;
+        return true;
+      },
+      builder: (context, state) {
+        // Loading state
+        if (state is ChatLoading) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        // Error state (non-model-download)
+        if (state is ChatError && !state.needsModelDownload) {
+          if (state.messages.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.error_outline,
+                      size: 48, color: AppColors.error),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(state.message),
+                  const SizedBox(height: AppSpacing.md),
+                  ElevatedButton(
+                    onPressed: () => context
+                        .read<ChatBloc>()
+                        .add(SessionInitialized(sessionId)),
+                    child: const Text('Thử lại'),
+                  ),
+                ],
+              ),
+            );
+          }
+          return Column(
+            children: [
+              _ErrorBanner(message: state.message),
+              Expanded(
+                child: _MessageList(
+                  messages: state.messages,
+                  sessionId: sessionId,
+                ),
+              ),
+            ],
+          );
+        }
+
+        // Extract messages from state
+        List<MessageModel> messages = [];
+        if (state is ChatLoaded) {
+          messages = state.messages;
+        } else if (state is ChatStreaming) {
+          messages = state.messages;
+        }
+
+        // Empty state
+        if (messages.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.chat_bubble_outline,
+                    size: 64, color: AppColors.subtleLight),
+                const SizedBox(height: AppSpacing.md),
+                const Text(
+                  'Bắt đầu cuộc trò chuyện',
+                  style: TextStyle(color: AppColors.subtleLight),
+                ),
+              ],
+            ),
+          );
+        }
+
+        // Messages with optional streaming bubble
+        return _MessageList(
+          messages: messages,
+          sessionId: sessionId,
+        );
+      },
+    );
+  }
+}
+
+/// Danh sách tin nhắn + streaming bubble.
+/// Dùng BlocBuilder riêng cho streaming text để chỉ rebuild bubble cuối.
 class _MessageList extends StatelessWidget {
   final List<MessageModel> messages;
   final String sessionId;
-  final String? streamingText;
-  final String? streamingId;
 
   const _MessageList({
     required this.messages,
     required this.sessionId,
-    this.streamingText,
-    this.streamingId,
   });
 
   @override
   Widget build(BuildContext context) {
     return ListView.builder(
-      padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.md),
-      itemCount: messages.length + (streamingText != null ? 1 : 0),
+      padding:
+          const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.md),
+      itemCount: messages.length + 1, // +1 cho streaming bubble
       itemBuilder: (context, index) {
-        if (streamingText != null && index == messages.length) {
+        if (index == messages.length) {
+          // Streaming bubble — rebuild riêng khi streamingText thay đổi
+          return _StreamingBubble(sessionId: sessionId);
+        }
+        return MessageBubble(message: messages[index]);
+      },
+    );
+  }
+}
+
+/// Bubble hiển thị text đang stream.
+/// Dùng BlocBuilder chỉ rebuild khi streamingText thay đổi.
+class _StreamingBubble extends StatelessWidget {
+  final String sessionId;
+  const _StreamingBubble({required this.sessionId});
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<ChatBloc, ChatState>(
+      buildWhen: (prev, curr) {
+        // Chỉ rebuild khi streamingText thay đổi
+        if (prev is ChatStreaming && curr is ChatStreaming) {
+          return prev.streamingText != curr.streamingText;
+        }
+        // Rebuild khi bắt đầu stream (Loaded → Streaming)
+        if (curr is ChatStreaming && prev is! ChatStreaming) return true;
+        // Rebuild khi kết thúc stream (Streaming → Loaded)
+        if (curr is! ChatStreaming && prev is ChatStreaming) return true;
+        return false;
+      },
+      builder: (context, state) {
+        if (state is ChatStreaming) {
           return MessageBubble(
             message: MessageModel(
-              id: streamingId!,
+              id: state.streamingId,
               sessionId: sessionId,
               role: MessageRole.assistant,
-              content: streamingText!,
+              content: state.streamingText,
               createdAt: DateTime.now(),
             ),
             isStreaming: true,
           );
         }
-        return MessageBubble(message: messages[index]);
+        // Stream đã kết thúc → hiển thị empty (đã có MessageBubble thật từ messages)
+        return const SizedBox.shrink();
       },
     );
   }
@@ -241,7 +416,8 @@ class _ErrorBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md, vertical: AppSpacing.xs),
       color: AppColors.error.withOpacity(0.1),
       child: Row(
         children: [
@@ -290,7 +466,6 @@ class _ChatInputBarState extends State<ChatInputBar> {
   Widget build(BuildContext context) {
     return BlocListener<ChatBloc, ChatState>(
       listener: (context, state) {
-        // FIX: Reset _isStreaming chính xác cho mọi state
         if (mounted) {
           setState(() {
             _isStreaming = state is ChatStreaming;
@@ -320,7 +495,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   minLines: 1,
                   textInputAction: TextInputAction.send,
                   decoration: InputDecoration(
-                    hintText: _isStreaming ? 'Đang trả lời...' : 'Nhập tin nhắn...',
+                    hintText:
+                        _isStreaming ? 'Đang trả lời...' : 'Nhập tin nhắn...',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(24),
                       borderSide: BorderSide.none,
@@ -336,10 +512,10 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
-              // FIX: Khi streaming hiện nút Cancel thay vì nút Send bị disable
               if (_isStreaming)
                 IconButton(
-                  onPressed: () => context.read<ChatBloc>().add(const StreamingCancelled()),
+                  onPressed: () =>
+                      context.read<ChatBloc>().add(const StreamingCancelled()),
                   icon: const Icon(Icons.stop_circle_outlined),
                   color: AppColors.error,
                   tooltip: 'Dừng',

@@ -85,7 +85,7 @@ class GeckoServiceImpl implements GeckoService {
 
 ---
 
-## 3. GemmaService Implementation
+## 3. GemmaService Implementation (v0.16.x — turn-based API)
 
 ```dart
 // services/gemma/gemma_service_impl.dart
@@ -94,32 +94,45 @@ import 'package:offline_chat/core/errors/app_exception.dart';
 
 class GemmaServiceImpl implements GemmaService {
   InferenceModel? _model;
+  InferenceModelSession? _session;
 
   @override
   bool get isReady => _model != null;
+  @override
+  bool get hasActiveSession => _session != null;
 
   @override
-  Future<void> initialize(String modelPath) async {
-    final file = File(modelPath);
-    if (!await file.exists()) {
-      throw const ModelNotLoadedException();
+  Future<void> initialize({String? modelPath, int maxTokens = 1024}) async {
+    if (modelPath != null) {
+      await FlutterGemma.installModel(
+        modelType: ModelType.gemmaIt,
+        fileType: ModelFileType.litertlm,
+      ).fromFile(modelPath).install();
     }
-    _model = await InferenceModel.createModel(
-      modelPath: modelPath,
-      preferredBackend: PreferredBackend.gpu,  // fallback to CPU automatically
+
+    _model = await FlutterGemma.getActiveModel(
+      maxTokens: maxTokens,
+      preferredBackend: PreferredBackend.gpu,
     );
   }
+
+  // ─── Legacy prompt-based API ──────────────────────────────────────────
 
   @override
   Stream<String> generateStream(String prompt) async* {
     if (_model == null) throw const ModelNotLoadedException();
-    final session = await InferenceModel.createSession(_model!);
+    final session = await _model!.createSession();
     try {
-      final stream = session.getResponseAsync(prompt);
+      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
+      final stream = session.getResponseAsync().timeout(
+        const Duration(seconds: 120),
+        onTimeout: (sink) {
+          sink.addError(const ModelTimeoutException());
+          sink.close();
+        },
+      );
       await for (final response in stream) {
-        if (response.text != null) {
-          yield response.text!;
-        }
+        yield response;
       }
     } finally {
       session.close();
@@ -127,9 +140,84 @@ class GemmaServiceImpl implements GemmaService {
   }
 
   @override
+  Future<String> generate(String prompt) async {
+    if (_model == null) throw const ModelNotLoadedException();
+    final session = await _model!.createSession();
+    try {
+      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
+      return await session.getResponse().timeout(
+        const Duration(seconds: 120),
+        onTimeout: () => throw const ModelTimeoutException(),
+      );
+    } finally {
+      session.close();
+    }
+  }
+
+  // ─── Session-based API (turn-based, giữ session giữa các request) ─────
+
+  @override
+  Future<void> createSession({String? systemInstruction}) async {
+    await _closeSessionInternal();
+    _session = await _model!.createSession(
+      systemInstruction: systemInstruction,
+    );
+  }
+
+  @override
+  Future<void> addHistoryMessage(String role, String content) async {
+    if (_session == null) await createSession();
+    await _session!.addQueryChunk(
+      Message.text(text: content, isUser: role == 'user'),
+    );
+  }
+
+  @override
+  Stream<String> generateWithSession(String userMessage) async* {
+    if (_session == null) throw const ModelNotLoadedException();
+    try {
+      await _session!.addQueryChunk(
+        Message.text(text: userMessage, isUser: true),
+      );
+      final stream = _session!.getResponseAsync().timeout(
+        const Duration(seconds: 120),
+        onTimeout: (sink) {
+          sink.addError(const ModelTimeoutException());
+          sink.close();
+        },
+      );
+      await for (final response in stream) {
+        yield response;
+      }
+    } catch (e) {
+      await _closeSessionInternal();
+      rethrow;
+    }
+  }
+
+  /// Khi dùng session-based, cần replay history từ DB vào session
+  /// mỗi khi mở chat page (không cần nhồi vào prompt text).
+  Future<void> replayHistory(List<MessageModel> history) async {
+    for (final msg in history) {
+      await addHistoryMessage(msg.role.name, msg.content);
+    }
+  }
+
+  @override
+  Future<void> closeSession() async {
+    await _closeSessionInternal();
+  }
+
+  Future<void> _closeSessionInternal() async {
+    try { await _session?.close(); } catch (_) {}
+    _session = null;
+  }
+
+  @override
   Future<void> dispose() async {
-    _model?.close();
+    await _closeSessionInternal();
     _model = null;
+    }
   }
 }
 ```

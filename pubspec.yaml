@@ -50,6 +50,7 @@ dependencies:
 
   # IDs
   uuid: ^4.4.0
+  logger: ^2.7.0
 
 dev_dependencies:
   flutter_test:

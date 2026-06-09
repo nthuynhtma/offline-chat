@@ -104,6 +104,7 @@ Future<void> setupLocator() async {
       geckoService: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
       promptBuilder: sl<PromptBuilderService>(),
+      modelBloc: sl<ModelBloc>(),
     ),
   );
 
