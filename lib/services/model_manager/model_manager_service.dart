@@ -54,7 +54,7 @@ class ModelInfo {
 }
 
 /// Service quản lý download model Gemma và Gecko.
-/// Hỗ trợ resume download, verify checksum, theo dõi progress.
+/// Hỗ trợ resume download, verify file size, theo dõi progress.
 abstract interface class ModelManagerService {
   /// Lấy thông tin model Gemma
   ModelInfo get gemmaInfo;
@@ -62,19 +62,19 @@ abstract interface class ModelManagerService {
   /// Lấy thông tin model Gecko
   ModelInfo get geckoInfo;
 
-  /// Stream cập nhật progress download
+  /// Stream cập nhật progress download (broadcast, replay state hiện tại khi subscribe)
   Stream<ModelInfo> get progressStream;
 
-  /// Bắt đầu download Gemma model
+  /// Bắt đầu download Gemma model (no-op nếu đang download)
   Future<void> downloadGemma();
 
-  /// Bắt đầu download Gecko model
+  /// Bắt đầu download Gecko model (no-op nếu đang download)
   Future<void> downloadGecko();
 
-  /// Huỷ download đang chạy
+  /// Huỷ download của đúng file được chỉ định
   Future<void> cancelDownload(String fileName);
 
-  /// Kiểm tra file đã tồn tại và còn nguyên vẹn không
+  /// Kiểm tra file đã tồn tại và kích thước hợp lệ không
   Future<bool> isModelFileValid(String fileName);
 
   /// Đường dẫn đầy đủ tới model file
@@ -82,23 +82,31 @@ abstract interface class ModelManagerService {
 
   /// Khởi tạo, kiểm tra file có sẵn
   Future<void> initialize();
+
+  /// Giải phóng resource
+  void dispose();
 }
 
 class ModelManagerServiceImpl implements ModelManagerService {
   final FileDownloader _downloader = FileDownloader();
 
-  // BUG FIX 1: Dùng broadcast StreamController để nhiều listener có thể subscribe
-  // (ModelBloc _progressSubscription + bất kỳ listener nào khác)
+  // FIX #1: Broadcast StreamController để nhiều listener subscribe được.
+  // Lưu state cuối cùng để emit ngay khi có listener mới (tương tự BehaviorSubject).
   final _progressController = StreamController<ModelInfo>.broadcast();
 
+  // FIX #7: Cache state cuối cùng của mỗi model để replay cho subscriber mới.
+  final Map<String, ModelInfo> _lastEmitted = {};
+
   static const String _modelsDir = 'models';
+  // Tolerance khi so sánh kích thước file: ±5 MB
+  static const int _sizeTolerance = 5 * 1024 * 1024;
 
   ModelInfo _gemmaInfo = const ModelInfo(
     name: 'Gemma 4E2B IT',
     fileName: kGemmaModelFileName,
     downloadUrl:
         'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm',
-    fileSizeBytes: 2000000000,
+    fileSizeBytes: 2588147712,
     checksumSha256: null,
   );
 
@@ -112,6 +120,7 @@ class ModelManagerServiceImpl implements ModelManagerService {
   );
 
   String? _modelsDirectory;
+  bool _initialized = false;
 
   @override
   ModelInfo get gemmaInfo => _gemmaInfo;
@@ -119,11 +128,20 @@ class ModelManagerServiceImpl implements ModelManagerService {
   @override
   ModelInfo get geckoInfo => _geckoInfo;
 
+  // FIX #7: Stream trả về state cuối cùng đã emit, sau đó tiếp tục nhận update.
   @override
-  Stream<ModelInfo> get progressStream => _progressController.stream;
+  Stream<ModelInfo> get progressStream async* {
+    for (final info in _lastEmitted.values) {
+      yield info;
+    }
+    yield* _progressController.stream;
+  }
 
   @override
   Future<void> initialize() async {
+    if (_initialized) return;
+    _initialized = true;
+
     final dir = await getApplicationDocumentsDirectory();
     _modelsDirectory = p.join(dir.path, _modelsDir);
     final modelsDir = Directory(_modelsDirectory!);
@@ -147,40 +165,51 @@ class ModelManagerServiceImpl implements ModelManagerService {
     // Kích hoạt persistent database để task tiếp tục sau khi app bị kill
     await _downloader.start();
 
-    // Kiểm tra file có sẵn
+    // Kiểm tra file có sẵn và hợp lệ
     final gemmaPath = p.join(_modelsDirectory!, kGemmaModelFileName);
     final geckoPath = p.join(_modelsDirectory!, kGeckoModelFileName);
 
     if (await File(gemmaPath).exists() &&
         await isModelFileValid(kGemmaModelFileName)) {
-      _gemmaInfo =
-          _gemmaInfo.copyWith(status: ModelStatus.downloaded, progress: 1.0);
+      _gemmaInfo = _gemmaInfo.copyWith(
+        status: ModelStatus.downloaded,
+        progress: 1.0,
+      );
     }
+
     if (await File(geckoPath).exists() &&
         await isModelFileValid(kGeckoModelFileName)) {
-      _geckoInfo =
-          _geckoInfo.copyWith(status: ModelStatus.downloaded, progress: 1.0);
+      _geckoInfo = _geckoInfo.copyWith(
+        status: ModelStatus.downloaded,
+        progress: 1.0,
+      );
     }
   }
 
   @override
   Future<void> downloadGemma() async {
+    // FIX #2: Guard race condition — không download lại nếu đang chạy
+    if (_gemmaInfo.status == ModelStatus.downloading) return;
+
     await _startDownload(
       modelInfo: _gemmaInfo,
       onUpdate: (info) {
         _gemmaInfo = info;
-        _progressController.add(info);
+        _safeEmit(info);
       },
     );
   }
 
   @override
   Future<void> downloadGecko() async {
+    // FIX #2: Guard race condition — không download lại nếu đang chạy
+    if (_geckoInfo.status == ModelStatus.downloading) return;
+
     await _startDownload(
       modelInfo: _geckoInfo,
       onUpdate: (info) {
         _geckoInfo = info;
-        _progressController.add(info);
+        _safeEmit(info);
       },
     );
   }
@@ -193,7 +222,10 @@ class ModelManagerServiceImpl implements ModelManagerService {
       await initialize();
     }
 
+    // FIX #6: taskId cố định bằng fileName để background_downloader
+    // có thể nhận diện và resume đúng task sau khi app bị kill.
     final task = DownloadTask(
+      taskId: modelInfo.fileName,
       url: modelInfo.downloadUrl,
       filename: modelInfo.fileName,
       directory: _modelsDir,
@@ -203,6 +235,11 @@ class ModelManagerServiceImpl implements ModelManagerService {
       updates: Updates.statusAndProgress,
       requiresWiFi: false,
     );
+
+    // FIX #1 (stale closure): Lưu progress hiện tại vào biến local
+    // để callback onStatus có thể đọc đúng giá trị cuối cùng.
+    // modelInfo là snapshot bất biến — không bao giờ tự cập nhật.
+    double currentProgress = 0.0;
 
     // Emit trạng thái bắt đầu download ngay lập tức
     onUpdate(modelInfo.copyWith(
@@ -215,64 +252,46 @@ class ModelManagerServiceImpl implements ModelManagerService {
       await _downloader.download(
         task,
         onProgress: (progress) {
-          // BUG FIX 2: background_downloader trả về 0.0..1.0, KHÔNG phải 0..100
-          // Code cũ: final p = progress / 100.0 → luôn ra ~0% vì 0.5/100 = 0.005
-          // Fix: dùng trực tiếp, clamp để an toàn
-          final normalizedProgress = progress.clamp(0.0, 1.0);
+          // FIX #2 (original): background_downloader trả về 0.0..1.0.
+          // Lưu vào currentProgress để onStatus dùng lại chính xác.
+          currentProgress = progress.clamp(0.0, 1.0);
           onUpdate(modelInfo.copyWith(
             status: ModelStatus.downloading,
-            progress: normalizedProgress,
+            progress: currentProgress,
           ));
         },
         onStatus: (status) async {
-          if (status == TaskStatus.complete) {
-            final modelPath =
-                p.join(_modelsDirectory!, modelInfo.fileName);
-            final file = File(modelPath);
+          switch (status) {
+            case TaskStatus.complete:
+              await _handleComplete(
+                modelInfo: modelInfo,
+                onUpdate: onUpdate,
+              );
 
-            if (await file.exists()) {
-              final actualSize = await file.length();
-              final sizeOk =
-                  (actualSize - modelInfo.fileSizeBytes).abs() <
-                      5 * 1024 * 1024;
+            case TaskStatus.canceled:
+              onUpdate(modelInfo.copyWith(
+                status: ModelStatus.notDownloaded,
+                progress: 0.0,
+              ));
 
-              if (sizeOk) {
-                onUpdate(modelInfo.copyWith(
-                  status: ModelStatus.downloaded,
-                  progress: 1.0,
-                ));
-              } else {
-                onUpdate(modelInfo.copyWith(
-                  status: ModelStatus.error,
-                  errorMessage:
-                      'Kích thước file không đúng: ${_formatBytes(actualSize)} '
-                      '(mong đợi ${_formatBytes(modelInfo.fileSizeBytes)})',
-                ));
-              }
-            } else {
+            case TaskStatus.failed:
               onUpdate(modelInfo.copyWith(
                 status: ModelStatus.error,
-                errorMessage: 'File không tìm thấy sau khi download',
+                errorMessage: 'Download thất bại. Vui lòng thử lại.',
               ));
-            }
-          } else if (status == TaskStatus.canceled) {
-            onUpdate(modelInfo.copyWith(
-              status: ModelStatus.notDownloaded,
-              progress: 0.0,
-            ));
-          } else if (status == TaskStatus.failed) {
-            onUpdate(modelInfo.copyWith(
-              status: ModelStatus.error,
-              errorMessage: 'Download thất bại',
-            ));
-          }
-          // BUG FIX 3: Các status trung gian (enqueued, running, waitingToRetry,
-          // paused) không cần xử lý nhưng KHÔNG được silent-drop khi là paused
-          else if (status == TaskStatus.paused) {
-            onUpdate(modelInfo.copyWith(
-              status: ModelStatus.downloading, // vẫn giữ UI downloading
-              // progress giữ nguyên giá trị cuối cùng
-            ));
+
+            case TaskStatus.paused:
+              // FIX #1 (stale closure): dùng currentProgress thực tế,
+              // không dùng modelInfo.progress (luôn là 0.0).
+              onUpdate(modelInfo.copyWith(
+                status: ModelStatus.downloading,
+                progress: currentProgress,
+              ));
+
+            // Các status trung gian (enqueued, running, waitingToRetry)
+            // không cần xử lý UI riêng.
+            default:
+              break;
           }
         },
       );
@@ -284,14 +303,58 @@ class ModelManagerServiceImpl implements ModelManagerService {
     }
   }
 
-  @override
-  Future<void> cancelDownload(String fileName) async {
-    await _downloader.cancelAll();
+  Future<void> _handleComplete({
+    required ModelInfo modelInfo,
+    required void Function(ModelInfo) onUpdate,
+  }) async {
+    final modelPath = p.join(_modelsDirectory!, modelInfo.fileName);
+    final file = File(modelPath);
+
+    if (!await file.exists()) {
+      onUpdate(modelInfo.copyWith(
+        status: ModelStatus.error,
+        errorMessage: 'File không tìm thấy sau khi download hoàn tất.',
+      ));
+      return;
+    }
+
+    final actualSize = await file.length();
+    final diff = (actualSize - modelInfo.fileSizeBytes).abs();
+
+    if (diff < _sizeTolerance) {
+      onUpdate(modelInfo.copyWith(
+        status: ModelStatus.downloaded,
+        progress: 1.0,
+      ));
+    } else {
+      // File bị corrupt hoặc download không đầy đủ — xoá để tránh dùng file lỗi
+      try {
+        await file.delete();
+      } catch (_) {}
+
+      onUpdate(modelInfo.copyWith(
+        status: ModelStatus.error,
+        errorMessage:
+            'Kích thước file không hợp lệ: ${_formatBytes(actualSize)} '
+            '(mong đợi ${_formatBytes(modelInfo.fileSizeBytes)}). '
+            'File đã bị xoá, vui lòng tải lại.',
+      ));
+    }
   }
 
+  // FIX #4: cancelDownload huỷ đúng task theo fileName,
+  // không huỷ tất cả như cancelAll().
+  @override
+  Future<void> cancelDownload(String fileName) async {
+    await _downloader.cancelTasksWithIds([fileName]);
+  }
+
+  // FIX #3: isModelFileValid tự khởi tạo nếu chưa initialize,
+  // thay vì return false ngay khi _modelsDirectory == null.
   @override
   Future<bool> isModelFileValid(String fileName) async {
-    if (_modelsDirectory == null) return false;
+    if (_modelsDirectory == null) await initialize();
+
     final path = p.join(_modelsDirectory!, fileName);
     final file = File(path);
     if (!await file.exists()) return false;
@@ -301,7 +364,7 @@ class ModelManagerServiceImpl implements ModelManagerService {
         ? _gemmaInfo.fileSizeBytes
         : _geckoInfo.fileSizeBytes;
 
-    return (size - expectedSize).abs() < 5 * 1024 * 1024;
+    return (size - expectedSize).abs() < _sizeTolerance;
   }
 
   @override
@@ -310,6 +373,14 @@ class ModelManagerServiceImpl implements ModelManagerService {
       await initialize();
     }
     return p.join(_modelsDirectory!, fileName);
+  }
+
+  // FIX #5 (resource leak): kiểm tra controller chưa đóng trước khi add.
+  void _safeEmit(ModelInfo info) {
+    _lastEmitted[info.fileName] = info;
+    if (!_progressController.isClosed) {
+      _progressController.add(info);
+    }
   }
 
   String _formatBytes(int bytes) {
@@ -322,6 +393,7 @@ class ModelManagerServiceImpl implements ModelManagerService {
     }
   }
 
+  @override
   void dispose() {
     _progressController.close();
   }

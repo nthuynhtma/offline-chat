@@ -1,3 +1,3 @@
 // Top-level constants cho model files
-const String kGemmaModelFileName = 'gemma4b-it.litertlm';
-const String kGeckoModelFileName = 'gecko-110m.tflite';
+const String kGemmaModelFileName = 'gemma-4-E2B-it.litertlm';
+const String kGeckoModelFileName = 'Gecko_256_quant.tflite';

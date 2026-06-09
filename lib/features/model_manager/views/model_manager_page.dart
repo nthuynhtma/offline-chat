@@ -12,10 +12,12 @@ class ModelManagerPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
-      create: (_) =>
-          sl<ModelBloc>()..add(const StatusChecked()),
-      child: const _ModelManagerView(),
-    );
+    // Dùng singleton từ sl thay vì tạo instance mới —
+    // đảm bảo cùng ModelBloc đã inject GemmaService/GeckoService
+    // và có thể gọi initialize() sau khi download xong.
+    create: (_) => sl<ModelBloc>()..add(const StatusChecked()),
+    child: const _ModelManagerView(),
+  );
   }
 }
 

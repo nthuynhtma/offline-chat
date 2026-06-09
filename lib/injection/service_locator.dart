@@ -22,27 +22,40 @@ import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 final sl = GetIt.instance;
 
 Future<void> setupLocator() async {
-  // Database - Drift generates the DAO accessors as part of AppDatabase
+  // ─── Database ──────────────────────────────────────────────────────────────
   final database = AppDatabase();
   sl.registerLazySingleton<AppDatabase>(() => database);
 
-  // Services
-  sl.registerLazySingleton<ModelManagerService>(() => ModelManagerServiceImpl());
+  // ─── Services ──────────────────────────────────────────────────────────────
+  sl.registerLazySingleton<ModelManagerService>(
+    () => ModelManagerServiceImpl(),
+  );
+
   sl.registerLazySingleton<GemmaService>(() => GemmaServiceImpl());
+
   final geckoService = GeckoServiceImpl();
-  sl.registerLazySingleton<GeckoService>(() => GeckoRetryService(geckoService));
+  sl.registerLazySingleton<GeckoService>(
+    () => GeckoRetryService(geckoService),
+  );
+
   sl.registerLazySingleton<SemanticCacheService>(
-      () => SemanticCacheServiceImpl());
+    () => SemanticCacheServiceImpl(),
+  );
   sl.registerLazySingleton<ExportSessionService>(
-      () => ExportSessionServiceImpl());
-  sl.registerLazySingleton<PromptBuilderService>(() => PromptBuilderServiceImpl());
+    () => ExportSessionServiceImpl(),
+  );
+  sl.registerLazySingleton<PromptBuilderService>(
+    () => PromptBuilderServiceImpl(),
+  );
   sl.registerLazySingleton<ChunkingService>(() => ChunkingServiceImpl());
-  sl.registerLazySingleton<DocumentParserService>(() => DocumentParserServiceImpl());
+  sl.registerLazySingleton<DocumentParserService>(
+    () => DocumentParserServiceImpl(),
+  );
   sl.registerLazySingleton<VectorStoreService>(
     () => VectorStoreServiceImpl(sl<AppDatabase>()),
   );
 
-  // Repositories
+  // ─── Repositories ──────────────────────────────────────────────────────────
   sl.registerLazySingleton<SessionRepository>(
     () => SessionRepositoryImpl(database.sessionsDao),
   );
@@ -59,12 +72,29 @@ Future<void> setupLocator() async {
     ),
   );
 
-  // Context Manager (depends on MessageRepository + GemmaService cho summary)
+  // ─── Context Manager ───────────────────────────────────────────────────────
   sl.registerLazySingleton<ContextManagerService>(
-    () => ContextManagerService(sl<MessageRepository>(), sl<GemmaService>()),
+    () => ContextManagerService(
+      sl<MessageRepository>(),
+      sl<GemmaService>(),
+    ),
   );
 
-  // Blocs
+  // ─── Blocs ─────────────────────────────────────────────────────────────────
+
+  // FIX: ModelBloc nhận thêm GemmaService & GeckoService để có thể gọi
+  // initialize() ngay khi download hoàn tất — đây là bước bị thiếu
+  // khiến isReady luôn = false dù file đã có trên disk.
+  sl.registerLazySingleton<ModelBloc>(
+    () => ModelBloc(
+      modelManager: sl<ModelManagerService>(),
+      gemmaService: sl<GemmaService>(),    // FIX
+      geckoService: sl<GeckoService>(),    // FIX
+    ),
+  );
+
+  // ChatBloc là singleton — tất cả ChatPage dùng chung một instance.
+  // GemmaService.isReady sẽ đúng vì cùng instance với ModelBloc đã initialize.
   sl.registerLazySingleton<ChatBloc>(
     () => ChatBloc(
       messageRepo: sl<MessageRepository>(),
@@ -83,9 +113,5 @@ Future<void> setupLocator() async {
 
   sl.registerLazySingleton<KnowledgeBloc>(
     () => KnowledgeBloc(sl<DocumentRepository>()),
-  );
-
-  sl.registerLazySingleton<ModelBloc>(
-    () => ModelBloc(modelManager: sl<ModelManagerService>()),
   );
 }
