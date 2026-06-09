@@ -259,9 +259,6 @@ class _ChatBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<ChatBloc, ChatState>(
       buildWhen: (prev, curr) {
-        // Chỉ rebuild khi state type thay đổi
-        // KHÔNG rebuild khi streamingText thay đổi (đã xử lý riêng trong _MessageList)
-        if (curr is ChatStreaming && prev is ChatStreaming) return false;
         if (curr is ChatThinking && prev is ChatThinking) return false;
         return true;
       },
@@ -410,6 +407,13 @@ class _MessageListState extends State<_MessageList> {
 
   @override
   Widget build(BuildContext context) {
+    // Auto-scroll mỗi lần widget rebuild (streaming text thay đổi)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_isNearBottom && mounted) {
+        _scrollToBottom();
+      }
+    });
+
     return Stack(
       children: [
         ListViewObserver(

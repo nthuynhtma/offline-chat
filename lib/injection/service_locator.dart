@@ -99,11 +99,9 @@ Future<void> setupLocator() async {
     () => ChatBloc(
       messageRepo: sl<MessageRepository>(),
       sessionRepo: sl<SessionRepository>(),
-      contextManager: sl<ContextManagerService>(),
       gemmaService: sl<GemmaService>(),
       geckoService: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
-      promptBuilder: sl<PromptBuilderService>(),
       modelBloc: sl<ModelBloc>(),
     ),
   );

@@ -120,11 +120,9 @@ class ChatError extends ChatState {
 class ChatBloc extends Bloc<ChatEvent, ChatState> {
   final MessageRepository _messageRepo;
   final SessionRepository _sessionRepo;
-  final ContextManagerService _contextManager;
   final GemmaService _gemmaService;
   final GeckoService _geckoService;
   final VectorStoreService _vectorStore;
-  final PromptBuilderService _promptBuilder;
   final ModelBloc _modelBloc;
   final Uuid _uuid = const Uuid();
 
@@ -144,19 +142,15 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   ChatBloc({
     required MessageRepository messageRepo,
     required SessionRepository sessionRepo,
-    required ContextManagerService contextManager,
     required GemmaService gemmaService,
     required GeckoService geckoService,
     required VectorStoreService vectorStore,
-    required PromptBuilderService promptBuilder,
     required ModelBloc modelBloc,
   })  : _messageRepo = messageRepo,
         _sessionRepo = sessionRepo,
-        _contextManager = contextManager,
         _gemmaService = gemmaService,
         _geckoService = geckoService,
         _vectorStore = vectorStore,
-        _promptBuilder = promptBuilder,
         _modelBloc = modelBloc,
         super(const ChatInitial()) {
     on<SessionInitialized>(_onSessionInitialized);
@@ -176,6 +170,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     try {
       final messages = await _messageRepo.getMessages(event.sessionId);
       _currentMessages = messages;
+
+      // Tạo Gemma session với system instruction
+      await _createGemmaSessionWithHistory(messages);
+
       emit(ChatLoaded(messages));
     } catch (e) {
       emit(ChatError(message: e.toString()));
@@ -204,12 +202,9 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             modelState.gemmaInfo.status == ModelStatus.downloaded;
 
         if (isDownloaded && !modelState.gemmaReady) {
-          // File đã download, model đang init (load vào memory).
-          // Lưu pending message để gửi sau, subscribe vào modelBloc stream.
           _pendingMessage = event.content;
           _isWaitingForModel = true;
 
-          // Subscribe vào modelBloc stream để tự động gửi khi model ready
           _modelSubscription?.cancel();
           _modelSubscription = _modelBloc.stream.listen((newState) {
             if (newState is ModelLoaded &&
@@ -220,13 +215,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
               _isWaitingForModel = false;
               _modelSubscription?.cancel();
               _modelSubscription = null;
-              // Gửi lại message đã lưu (dùng microtask tránh race condition)
               Future.microtask(() => add(SendMessageRequested(pending!)));
             }
           });
 
-          // Subscribe lần đầu có thể bỏ qua state hiện tại
-          // Nếu model đã ready giữa lúc kiểm tra và subscribe
           final currentModelState = _modelBloc.state;
           if (currentModelState is ModelLoaded &&
               currentModelState.gemmaReady) {
@@ -234,7 +226,6 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             _pendingMessage = null;
             _modelSubscription?.cancel();
             _modelSubscription = null;
-            // Continue bên dưới thay vì loading
           } else {
             emit(const ChatLoading());
             return;
@@ -242,7 +233,6 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         }
 
         if (!isDownloaded) {
-          // Chưa download → emit error như cũ
           emit(ChatError(
             message: 'Model AI chưa được tải. Vui lòng tải model trước.',
             needsModelDownload: true,
@@ -251,7 +241,6 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           return;
         }
       } else {
-        // ModelLoading hoặc ModelError → đợi
         emit(const ChatLoading());
         return;
       }
@@ -288,43 +277,59 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             topK: 5,
             threshold: 0.7,
           );
-          log_util.log.i('🔍 [RAG] Tìm thấy ${ragResults.length} chunks liên quan (topK=5, threshold=0.7)');
-          if (ragResults.isNotEmpty) {
-            for (int i = 0; i < ragResults.length; i++) {
-              log_util.log.d('[RAG]   chunk[$i]: score=${ragResults[i].score.toStringAsFixed(4)} chunkId=${ragResults[i].chunkId} text="${ragResults[i].chunkText.length > 80 ? '${ragResults[i].chunkText.substring(0, 80)}...' : ragResults[i].chunkText}"');
-            }
-          }
+          log_util.log.i('🔍 [RAG] Tìm thấy ${ragResults.length} chunks liên quan');
         } catch (e) {
-          log_util.log.w('⚠️ [RAG] Lỗi khi retrieve chunks: $e — graceful degradation, ragResults=[]');
-          // Graceful degradation
+          log_util.log.w('⚠️ [RAG] Lỗi khi retrieve chunks: $e — graceful degradation');
           ragResults = [];
         }
-      } else {
-        log_util.log.w('⚠️ [RAG] Gecko service chưa ready — bỏ qua RAG retrieval');
       }
 
-      // 3. Build context
-      log_util.log.i('🧠 [Context] Đang build context...');
-      final context = await _contextManager.buildContext(
-        question: event.content,
-        sessionId: _currentSessionId!,
-        ragResults: ragResults,
-      );
-      log_util.log.i('🧠 [Context] Context built: history=${context.history.length} messages, chunks=${context.relevantChunks.length}, summary=${context.summary != null && context.summary!.isNotEmpty ? context.summary!.length.toString() : "none"}, estimatedTokens=${context.estimatedTokens}, historyWasTrimmed=${context.historyWasTrimmed}');
+      // 3. Build user message với RAG context nếu có
+      String userMessageForModel = event.content;
+      if (ragResults.isNotEmpty) {
+        final ragPreface = StringBuffer();
+        ragPreface.writeln('[Tài liệu tham khảo từ cơ sở tri thức cá nhân (ưu tiên dùng thông tin này):]');
+        for (int i = 0; i < ragResults.length; i++) {
+          ragPreface.writeln('\n[Tài liệu ${i + 1}]');
+          ragPreface.writeln(ragResults[i].chunkText);
+        }
+        ragPreface.writeln('\n[Câu hỏi của người dùng:]');
+        ragPreface.writeln(event.content);
+        userMessageForModel = ragPreface.toString();
 
-      // 4. Build prompt
-      log_util.log.i('📝 [Prompt] Đang build prompt...');
-      final prompt = _promptBuilder.build(context);
-      final promptLineCount = prompt.split('\n').length;
-      log_util.log.i('📝 [Prompt] Prompt built: ${prompt.length} chars, $promptLineCount lines');
-      log_util.log.d('📝 [Prompt] === FULL PROMPT ===\n$prompt\n📝 [Prompt] === END PROMPT ===');
+        // Kiểm tra nếu quá dài thì trim RAG chunks
+        final estimatedTokens = (userMessageForModel.length / 3).ceil();
+        if (estimatedTokens > 800) {
+          log_util.log.w('⚠️ [RAG] User message + RAG quá dài (~$estimatedTokens tokens), cắt giảm RAG');
+          final shortRagPreface = StringBuffer();
+          shortRagPreface.writeln('[Tài liệu tham khảo:]');
+          var usedChars = shortRagPreface.length;
+          for (int i = 0; i < ragResults.length && usedChars < 2400; i++) {
+            final chunk = ragResults[i].chunkText;
+            final maxChunkLen = 800 - usedChars - event.content.length;
+            final trimmedChunk = maxChunkLen > 100 ? chunk.substring(0, maxChunkLen) : chunk.substring(0, 100);
+            shortRagPreface.writeln('\n[Tài liệu ${i + 1}]');
+            shortRagPreface.writeln(trimmedChunk);
+            usedChars += chunk.length + 20;
+          }
+          shortRagPreface.writeln('\n[Câu hỏi:]');
+          shortRagPreface.writeln(event.content);
+          userMessageForModel = shortRagPreface.toString();
+        }
+      }
 
-      // 5. Stream response
+      // 4. Đảm bảo session tồn tại
+      if (!_gemmaService.hasActiveSession) {
+        log_util.log.i('🔄 [Session] Tạo Gemma session mới...');
+        await _createGemmaSessionWithHistory(_currentMessages);
+      }
+
+      // 5. Stream response qua session API
       final assistantMsgId = _uuid.v4();
-      log_util.log.i('🚀 [Stream] Bắt đầu generate stream (assistantMsgId=$assistantMsgId)');
+      log_util.log.i('🚀 [Stream] Bắt đầu generateWithSession (assistantMsgId=$assistantMsgId)');
 
       await emit.forEach<String>(
-        _gemmaService.generateStream(prompt),
+        _gemmaService.generateWithSession(userMessageForModel),
         onData: (token) {
           _accumulatedText += token;
           return ChatStreaming(
@@ -335,7 +340,9 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           );
         },
         onError: (error, _) {
-          log_util.log.e('❌ [Stream] Lỗi trong quá trình stream: $error');
+          log_util.log.e('❌ [Stream] Lỗi: $error');
+          // Session lỗi → đóng để tạo lại lần sau
+          _gemmaService.closeSession();
           return ChatError(
             message: error.toString(),
             messages: currentMessages,
@@ -343,7 +350,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         },
       );
 
-      // 6. Save complete assistant message (nếu có nội dung và không lỗi)
+      // 6. Save complete assistant message
       if (_accumulatedText.isNotEmpty && state is! ChatError) {
         log_util.log.i('💾 [SendMessage] Lưu assistant response (${_accumulatedText.length} chars)');
 
@@ -353,18 +360,18 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           content: _accumulatedText,
         );
 
-        // 7. Update session timestamp
         await _sessionRepo.updateSessionTimestamp(_currentSessionId!);
 
         final finalMessages = <MessageModel>[...currentMessages, assistantMsg];
         _currentMessages = finalMessages;
-        log_util.log.i('✅ [SendMessage] Hoàn tất: ${currentMessages.length} messages trong session, response length=${_accumulatedText.length}');
+        log_util.log.i('✅ [SendMessage] Hoàn tất: ${currentMessages.length} messages, response=${_accumulatedText.length} chars');
         emit(ChatLoaded(finalMessages));
       } else {
         log_util.log.w('⚠️ [SendMessage] Response rỗng hoặc có lỗi — không lưu assistant message');
       }
     } catch (e) {
       log_util.log.e('❌ [SendMessage] Lỗi: $e');
+      _gemmaService.closeSession();
       if (e is ModelNotLoadedException) {
         emit(ChatError(
           message: e.message,
@@ -448,6 +455,48 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     } catch (e) {
       emit(ChatError(message: e.toString(), messages: _currentMessages));
     }
+  }
+
+  /// Tạo Gemma session mới với system instruction và replay history.
+  Future<void> _createGemmaSessionWithHistory(List<MessageModel> messages) async {
+    if (!_gemmaService.isReady) return;
+
+    // System instruction là "linh hồn" của AgriAI
+    const systemInstruction = '''
+You are AgriAI, an agricultural assistant running completely offline on a mobile device.
+
+Your primary purpose is to help users with:
+- Crop cultivation and management
+- Soil health and fertilization
+- Pest and disease identification
+- Irrigation and water management
+- Livestock and poultry farming
+- Agricultural best practices
+- Sustainable farming techniques
+
+Instructions:
+- Answer in the same language as the user.
+- Provide practical, clear, and actionable agricultural advice.
+- If you are uncertain, clearly state your uncertainty instead of guessing.
+- Keep answers concise unless the user asks for more detail.
+- Explain agricultural terms in simple language.
+- Do not claim to have internet access, real-time data, weather data, or external services.
+- Remember that you operate completely offline on the user's mobile device.
+''';
+
+    await _gemmaService.createSession(
+      systemInstruction: systemInstruction,
+    );
+    log_util.log.i('🆕 [Session] Gemma session created');
+
+    // Replay lịch sử chat vào session
+    for (final msg in messages) {
+      await _gemmaService.addHistoryMessage(
+        msg.role.name,
+        msg.content,
+      );
+    }
+    log_util.log.i('🔄 [Session] Replayed ${messages.length} messages into Gemma session');
   }
 
   @override

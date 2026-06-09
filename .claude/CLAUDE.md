@@ -1,9 +1,9 @@
 # OfflineChat - AI Agent Guide
 
 ## Mô tả dự án
-Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4B (flutter_gemma ^0.16.4)** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
+Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4-E2B (flutter_gemma ^0.16.4)** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
 
-**Trạng thái hiện tại:** Đã fix lỗi `NoSuchMethodError` do API `flutter_gemma` cũ (0.13.x → 0.16.4) - `getResponseAsync` không còn nhận prompt làm tham số, chuyển sang turn-based API với `addQueryChunk(Message)`.
+**Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Gemma session được tạo khi vào chat, history được replay, mỗi turn chỉ gửi user message mới + RAG context. ChatBloc không còn phụ thuộc ContextManagerService/PromptBuilderService.
 
 ---
 
@@ -29,6 +29,8 @@
 | File Parsing | syncfusion_flutter_pdf | ^33.2.10 |
 | DI | get_it | ^9.2.1 |
 | Navigation | go_router | ^17.3.0 |
+| Markdown Rendering | flutter_markdown_plus | ^1.0.7 |
+| Scroll Detection | scrollview_observer | ^1.27.0 |
 
 ---
 
@@ -50,6 +52,9 @@ User mở ChatPage(sessionId)
        └→ ChatBloc._onSessionInitialized()
             ├→ emit(ChatLoading)
             ├→ load messages từ SQLite
+            ├→ _createGemmaSessionWithHistory(messages)
+            │    ├→ GemmaService.createSession(systemInstruction: "You are AgriAI...")
+            │    └→ Replay từng message qua addHistoryMessage(role, content)
             └→ emit(ChatLoaded(messages))
 
 User gõ text → nhấn Send
@@ -59,29 +64,25 @@ User gõ text → nhấn Send
        │    ├→ Đã download nhưng chưa ready → subscribe ModelBloc, đợi gemmaReady
        │    └→ Chưa download → emit(ChatError(needsModelDownload: true))
        │
-       ├→ [1] Save user message → SQLite → emit(ChatLoaded)
+       ├→ [1] Save user message → SQLite → emit(ChatThinking)
        ├→ [2] RAG Retrieval (nếu Gecko ready)
        │    └→ _geckoService.embed(content) → queryVector[768]
        │    └→ _vectorStore.search(queryVector, topK:5, threshold:0.7)
-       ├→ [3] Context Manager
-       │    └→ ContextManagerService.buildContext(...)
-       │    │    ├→ Trim RAG theo ragBudget (4000 tokens)
-       │    │    ├→ Kiểm tra cache summary:
-       │    │    │    ├→ Có cache → dùng ngay
-       │    │    │    └→ Chưa có → chạy _summarizeHistory() background (unawaited), không block
-       │    │    └→ Trim history theo historyBudget (3000 tokens)
-       ├→ [4] Prompt Builder
-       │    └→ PromptBuilderService.build(context)
-       │    │    → Gemma format: <start_of_turn>system + [RAG] + [Summary] + history + question + <start_of_turn>model
-       ├→ [5] Stream response
-       │    └→ emit.forEach<String>(_gemmaService.generateStream(prompt))
-       │    │    ├→ GemmaServiceImpl: tạo session → addQueryChunk → getResponseAsync() (timeout 120s)
+       ├→ [3] Build user message với RAG context
+       │    └→ Inject RAG chunks vào user message:
+       │         "[Tài liệu tham khảo...] [Tài liệu 1]... [Câu hỏi của người dùng:]..."
+       │    └→ Nếu >800 tokens → tự động trim RAG chunks
+       ├→ [4] Đảm bảo session tồn tại (nếu lỗi → tạo lại)
+       ├→ [5] Stream response qua Session API
+       │    └→ emit.forEach<String>(_gemmaService.generateWithSession(userMessageForModel))
+       │    │    ├→ GemmaServiceImpl: addQueryChunk(userMessage) → getResponseAsync() (timeout 120s)
        │    │    ├→ Mỗi token → emit(ChatStreaming)
-       │    │    └→ UI: _StreamingBubble cập nhật từng token
+       │    │    └→ UI: _LastBubble cập nhật từng token
        ├→ [6] Stream complete
        │    └→ Save assistant message → SQLite → emit(ChatLoaded)
        └→ [Catch] Error handling
             ├→ ModelNotLoadedException → emit(ChatError(needsModelDownload: true))
+            ├→ Session lỗi → closeSession() → tạo lại lần sau
             └→ Khác → emit(ChatError(message))
 
 User nhấn Stop ⏹
@@ -91,21 +92,32 @@ User nhấn Stop ⏹
 User pop ChatPage (Destroy)
   └→ BlocProvider dispose ChatBloc
   └→ ChatBloc.close(): cancel ModelBloc subscription, clear accumulated text
-  └→ ChatInputBar.dispose(): giải phóng TextEditingController
-  └→ Session tự close trong finally block của generateStream()
 ```
 
 ### 2. Kiến trúc UI - Tối ưu rebuild
 ```
 ChatView (StatefulWidget)
-  ├── AppBar → _ClearButton (BlocBuilder riêng, buildWhen: streaming state change)
+  ├── AppBar → _ClearButton (BlocBuilder riêng, buildWhen: streaming/thinking state change)
   └── Column
        ├── _ModelNotInstalledBanner (BlocBuilder riêng)
-       ├── Expanded → _ChatBody (BlocBuilder riêng, buildWhen: state TYPE change)
-       │    └── _MessageList (ListView.builder)
-       │         ├── MessageBubble (messages từ DB)
-       │         └── _StreamingBubble (BlocBuilder riêng, buildWhen: streamingText change)
+       ├── Expanded → _ChatBody (BlocBuilder, buildWhen: trừ ChatThinking→ChatThinking)
+       │    └── _MessageList (StatefulWidget, ScrollController + ListViewObserver)
+       │         ├── MessageBubble (messages từ DB, dùng MarkdownBody cho AI)
+       │         └── _LastBubble (BlocBuilder riêng, buildWhen: streamingText change)
+       │              ├── ChatThinking → _ThinkingBubble (3 chấm animation)
+       │              └── ChatStreaming → MessageBubble(isStreaming: true)
+       ├── _ScrollToBottomButton (AnimatedOpacity + AnimatedSlide, "Mới nhất")
        └── ChatInputBar (BlocListener → setState local _isStreaming)
+```
+
+### 3. Auto-scroll mechanism
+```
+_MessageListState:
+  - _isNearBottom: phát hiện qua ListViewObserver.onObserve
+  - _scrollToBottom(): method tái sử dụng
+  - initState(): addPostFrameCallback → _scrollToBottom() (lần đầu vào chat)
+  - didUpdateWidget(): if _isNearBottom → _scrollToBottom() (message mới)
+  - build(): addPostFrameCallback → if _isNearBottom → _scrollToBottom() (streaming)
 ```
 
 ---
@@ -114,20 +126,19 @@ ChatView (StatefulWidget)
 
 ### GemmaService (flutter_gemma 0.16.4)
 ```
-API model: turn-based chat
-  createSession() → addQueryChunk(Message) → getResponseAsync() (no args)
+API model: turn-based chat — SESSION-BASED (không còn dùng prompt-based ở ChatBloc)
+  createSession(systemInstruction) → addHistoryMessage(role, content) → generateWithSession(userMessage)
 
-Hỗ trợ 2 chế độ:
-1. Legacy (prompt-based): generateStream(prompt) / generate(prompt)
-   → Tạo session mới, inject full prompt vào addQueryChunk, close session
+ChatBloc dùng session-based:
+  → _createGemmaSessionWithHistory() khi SessionInitialized
+  → generateWithSession() mỗi turn
+  → hasActiveSession, closeSession() khi lỗi
 
-2. Session-based (mới): createSession() + addHistoryMessage() + generateWithSession()
-   → Giữ session dài hạn, chỉ add user message mới mỗi turn
-   → replayHistory() để load history từ DB khi mở chat page
-   → hasActiveSession, closeSession()
-
-Timeout: 120s cho cả generate stream và generate sync
+maxTokens: 2048 (kGemmaMaxTokens trong model_constants.dart)
+Timeout: 120s
 Exceptions: ModelNotLoadedException, ModelTimeoutException
+
+Legacy generateStream(prompt) / generate(prompt) vẫn tồn tại nhưng không dùng trong ChatBloc.
 ```
 
 ### GeckoService (flutter_gemma EmbeddingModel)
@@ -145,33 +156,18 @@ Flow: registerModel(modelPath, tokenizerPath) → initialize() → embed(text) /
 - Đủ dùng cho < 50,000 chunks
 ```
 
-### ContextManagerService (Token Budget)
+### ContextManagerService (Token Budget) — KHÔNG dùng trong ChatBloc
 ```
-totalBudget = 8000 tokens
-  ├─ ragBudget = 4000
-  ├─ historyBudget = 3000
-  ├─ questionBudget = 1000
-  └─ summaryBudget = 500
-
-Cơ chế summarize: async (unawaited), lần đầu trim history tạm thời,
-lần sau dùng summary từ cache. Không block inference chính.
-summaryThreshold = 3000 tokens
+Giữ lại cho session cycling trong tương lai.
+Budget hiện tại (chưa cập nhật, chỉ tham khảo):
+  totalBudget = 8000 tokens (sai với runtime 2048)
+  ragBudget = 4000, historyBudget = 3000, questionBudget = 1000, summaryBudget = 500
 ```
 
-### PromptBuilderService (Gemma Format)
+### PromptBuilderService — KHÔNG dùng trong ChatBloc
 ```
-<start_of_turn>system
-[System instruction]
-[Relevant context from documents (RAG)]
-[Conversation summary (nếu có)]
-<end_of_turn>
-<start_of_turn>user
-[History messages...]
-<end_of_turn>
-<start_of_turn>user
-[Current question]
-<end_of_turn>
-<start_of_turn>model\n
+Đã bị loại bỏ khỏi ChatBloc khi migrate sang session-based API.
+Giữ lại code để tham khảo hoặc dùng cho mục đích khác.
 ```
 
 ---
@@ -191,10 +187,11 @@ AppException (base)
 
 ## ChatBloc States
 ```
-ChatInitial → ChatLoading → ChatLoaded | ChatStreaming → ChatLoaded | ChatError
-                                                          ↑ Stop
-                                                          StreamingCancelled → ChatLoaded
+ChatInitial → ChatLoading → ChatLoaded | ChatThinking | ChatStreaming → ChatLoaded | ChatError
+                                                    ↑ Stop
+                                                    StreamingCancelled → ChatLoaded
 
+ChatThinking: messages (hiển thị 3 dots animation, emit sau khi save user msg, trước khi stream)
 ChatStreaming: messages, streamingText, streamingId, ragResults
 ChatLoaded: messages
 ChatError: message, needsModelDownload, messages
@@ -207,6 +204,10 @@ ChatError: message, needsModelDownload, messages
 GetIt — quản lý dependency graph (singleton services, repositories)
 MultiBlocProvider ở app.dart — lifecycle của singleton blocs
 ChatBloc — Factory pattern, mỗi session tạo mới, BlocProvider ở ChatPage với key
+
+ChatBloc constructor (đã cleanup):
+  messageRepo, sessionRepo, gemmaService, geckoService, vectorStore, modelBloc
+  (KHÔNG còn: contextManager, promptBuilder)
 ```
 
 ---
@@ -216,23 +217,24 @@ ChatBloc — Factory pattern, mỗi session tạo mới, BlocProvider ở ChatPa
 lib/
 ├── core/
 │   ├── constants/
-│   ├── errors/                   ← app_exception.dart (ModelTimeoutException)
+│   │   └── model_constants.dart   ← kGemmaMaxTokens = 2048
+│   ├── errors/                    ← app_exception.dart (ModelTimeoutException)
 │   └── utils/
 ├── features/
 │   ├── chat/
-│   │   ├── bloc/                 ← chat_bloc.dart
+│   │   ├── bloc/                  ← chat_bloc.dart (session-based)
 │   │   ├── models/
 │   │   ├── repositories/
-│   │   └── views/                ← chat_page.dart (tối ưu rebuild)
+│   │   └── views/                 ← chat_page.dart, message_bubble.dart, rag_sources_widget.dart
 │   ├── session/
 │   ├── knowledge/
 │   └── model_manager/
 ├── services/
-│   ├── gemma/                    ← gemma_service.dart (session-based + legacy)
+│   ├── gemma/                     ← gemma_service.dart (session-based + legacy)
 │   ├── gecko/
 │   ├── vectorstore/
-│   ├── context/                  ← context_manager_service.dart (async summarize)
-│   ├── prompt/                   ← prompt_builder_service.dart
+│   ├── context/                   ← context_manager_service.dart (async summarize, chưa dùng)
+│   ├── prompt/                    ← prompt_builder_service.dart (không dùng trong ChatBloc)
 │   └── parser/
 ├── database/
 │   ├── app_database.dart
@@ -254,7 +256,15 @@ lib/
 | Model treo → UI block vô hạn | Thêm `.timeout(Duration(seconds: 120))` + `ModelTimeoutException` |
 | BlocBuilder rebuild toàn bộ UI mỗi token | Tách 5 widget con với `buildWhen` riêng |
 | Summarize block inference → TTFT bị trễ | Chạy background với `unawaited()`, dùng cache cho request sau |
-| Mỗi request tạo session mới, không dùng KV-cache | Thêm session-based API: `createSession()` + `generateWithSession()` |
+| **maxTokens=1024 → lỗi tràn token (1073 >= 1024)** | Tăng `kGemmaMaxTokens = 2048` trong `model_constants.dart` |
+| **Prompt quá dài do build toàn bộ history mỗi lần** | Chuyển sang **Session-based API**: `createSession` + `generateWithSession` |
+| Duplicate user message trong prompt | Skip last history message nếu trùng với question (trong prompt-based, đã deprecated) |
+| Không có thinking indicator khi AI xử lý | Thêm `ChatThinking` state + `_ThinkingBubble` (3 dots animation) |
+| `scrollable_positioned_list` không maintained | Migrate sang `scrollview_observer: ^1.27.0` |
+| AI response chỉ là plain text | Tích hợp `flutter_markdown_plus: ^1.0.7` dùng `MarkdownBody` cho AI bubble |
+| Không scroll khi streaming | Thêm `addPostFrameCallback` trong `build()` + bỏ block `ChatStreaming→ChatStreaming` trong `buildWhen` |
+| Không scroll về cuối khi vào chat | Thêm `_scrollToBottom()` trong `initState()` với `addPostFrameCallback` |
+| RenderBox not laid out với Markdown | Dùng `MarkdownBody` (không dùng `Markdown` widget có ListView lồng) |
 
 ---
 

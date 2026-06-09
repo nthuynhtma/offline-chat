@@ -1,13 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/core/errors/app_exception.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
 abstract interface class GemmaService {
   /// Initialize Gemma model.
   /// [modelPath] is not needed when using FlutterGemma API (auto-detected),
   /// but kept for backward compatibility with the contract.
-  Future<void> initialize({String? modelPath, int maxTokens = 1024});
+  Future<void> initialize({String? modelPath, int maxTokens = kGemmaMaxTokens});
   bool get isReady;
   Future<void> dispose();
 
@@ -56,7 +58,7 @@ class GemmaServiceImpl implements GemmaService {
   bool get hasActiveSession => _session != null;
 
   @override
-  Future<void> initialize({String? modelPath, int maxTokens = 1024}) async {
+  Future<void> initialize({String? modelPath, int maxTokens = kGemmaMaxTokens}) async {
     try {
       // Bước 1: Đăng ký file với flutter_gemma qua installModel().fromFile()
       if (modelPath != null) {
@@ -71,6 +73,7 @@ class GemmaServiceImpl implements GemmaService {
         maxTokens: maxTokens,
         preferredBackend: PreferredBackend.gpu,
       );
+      log_util.log.i('🚀 [GemmaService] Model initialized with maxTokens=$maxTokens');
     } catch (e) {
       if (e is StateError || e is ArgumentError) {
         throw ModelNotLoadedException(message: e.toString());
