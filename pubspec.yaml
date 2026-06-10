@@ -42,7 +42,7 @@ dependencies:
 
   # File Parsing
   archive: ^4.0.9
-  syncfusion_flutter_pdf: ^33.2.10
+  syncfusion_flutter_pdf: ^33.2.12
   sqlite3_flutter_libs: ^0.6.0+eol
 
   # AI

@@ -88,6 +88,12 @@ class GemmaServiceImpl implements GemmaService {
   Stream<String> generateStream(String prompt) async* {
     if (_model == null) throw const ModelNotLoadedException();
 
+    // LiteRT LM chỉ support 1 session tại 1 thời điểm.
+    // Khi createSession() được gọi, session cũ (nếu có) bị invalidate ở FFI.
+    // → Lưu và set null _session để tránh dirty state.
+    final savedSession = _session;
+    _session = null;
+
     final session = await _model!.createSession();
     try {
       await session.addQueryChunk(Message.text(text: prompt, isUser: true));
@@ -104,12 +110,23 @@ class GemmaServiceImpl implements GemmaService {
       }
     } finally {
       session.close();
+      // LiteRT chỉ cho 1 session — session cũ đã bị invalidate bởi createSession
+      if (savedSession != null) {
+        log_util.log.d('♻️ [GemmaService] generateStream: session chính bị invalidate, set null');
+        _session = null; // Intentional — không thể restore
+      }
     }
   }
 
   @override
   Future<String> generate(String prompt) async {
     if (_model == null) throw const ModelNotLoadedException();
+
+    // LiteRT LM chỉ support 1 session tại 1 thời điểm.
+    // Khi createSession() được gọi, session cũ (nếu có) bị invalidate ở FFI.
+    // → Lưu và set null _session để tránh dirty state.
+    final savedSession = _session;
+    _session = null;
 
     final session = await _model!.createSession();
     try {
@@ -122,6 +139,11 @@ class GemmaServiceImpl implements GemmaService {
       return response;
     } finally {
       session.close();
+      // LiteRT chỉ cho 1 session — session cũ đã bị invalidate bởi createSession
+      if (savedSession != null) {
+        log_util.log.d('♻️ [GemmaService] generate: session chính bị invalidate, set null');
+        // _session đã là null từ đầu, giữ nguyên
+      }
     }
   }
 
@@ -188,6 +210,7 @@ class GemmaServiceImpl implements GemmaService {
   }
 
   Future<void> _closeSessionInternal() async {
+    log_util.log.d('_closeSessionInternal called\n${StackTrace.current}');
     try {
       await _session?.close();
     } catch (_) {

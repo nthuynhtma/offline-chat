@@ -72,9 +72,9 @@ class DocumentParserServiceImpl implements DocumentParserService {
     try {
       switch (type) {
         case DocumentType.pdf:
-          return _parsePdf(filePath);
+          return await _parsePdf(filePath);
         case DocumentType.docx:
-          return _parseDocx(filePath);
+          return await _parseDocx(filePath);
         case DocumentType.txt:
         case DocumentType.markdown:
           return await file.readAsString();
@@ -85,22 +85,33 @@ class DocumentParserServiceImpl implements DocumentParserService {
     }
   }
 
-  String _parsePdf(String filePath) {
+  Future<String> _parsePdf(String filePath) async {
+    PdfDocument? pdfDocument;
     try {
-      final bytes = File(filePath).readAsBytesSync();
-      final pdfDocument = PdfDocument(inputBytes: bytes);
+      final bytes = await File(filePath).readAsBytes();
+      pdfDocument = PdfDocument(inputBytes: bytes);
       final textExtractor = PdfTextExtractor(pdfDocument);
-      final text = textExtractor.extractText();
-      pdfDocument.dispose();
-      return text.trim();
-    } catch (e) {
-      throw DocumentParseException('PDF parsing failed: $e');
+      final text = textExtractor.extractText().trim();
+      if (text.isEmpty) {
+        throw const DocumentParseException('No text found in PDF');
+      }
+      return text;
+    } catch (e, stackTrace) {
+      if (e is DocumentParseException) {
+        Error.throwWithStackTrace(e, stackTrace);
+      }
+      Error.throwWithStackTrace(
+        DocumentParseException('PDF parsing failed: $e'),
+        stackTrace,
+      );
+    } finally {
+      pdfDocument?.dispose();
     }
   }
 
-  String _parseDocx(String filePath) {
+  Future<String> _parseDocx(String filePath) async {
     try {
-      final bytes = File(filePath).readAsBytesSync();
+      final bytes = await File(filePath).readAsBytes();
       final archive = ZipDecoder().decodeBytes(bytes);
 
       // Find word/document.xml
@@ -112,10 +123,19 @@ class DocumentParserServiceImpl implements DocumentParserService {
       );
 
       final content = String.fromCharCodes(documentFile.content);
-      return _extractDocxText(content);
-    } catch (e) {
-      if (e is DocumentParseException) rethrow;
-      throw DocumentParseException('DOCX parsing failed: $e');
+      final text = _extractDocxText(content);
+      if (text.isEmpty) {
+        throw const DocumentParseException('No text found in DOCX');
+      }
+      return text;
+    } catch (e, stackTrace) {
+      if (e is DocumentParseException) {
+        Error.throwWithStackTrace(e, stackTrace);
+      }
+      Error.throwWithStackTrace(
+        DocumentParseException('DOCX parsing failed: $e'),
+        stackTrace,
+      );
     }
   }
 

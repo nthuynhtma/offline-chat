@@ -70,7 +70,9 @@ User gõ text → nhấn Send
        │    └→ RagServiceImpl: embed (GeckoService) → vector search (topK:20, threshold:0.7) → chunk-level trim → RagContext
        ├→ [3] Build prompt → PromptBuilder.build(question, ragContext, history, sessionSummary, userMemories)
        │    └→ PromptBuilderImpl: system prompt + RAG chunks + summary + user memories + history + question
-       ├→ [4] Đảm bảo session tồn tại (nếu lỗi → tạo lại)
+       ├→ [4] Kiểm tra `_gemmaService.hasActiveSession`
+       │    ├→ Nếu `false` (bị invalidate bởi legacy `generate()`) → `_createGemmaSessionWithHistory()`
+       │    └→ Guard dòng 389 chat_bloc.dart: `if (!_gemmaService.hasActiveSession) { ... }`
        ├→ [5] Stream response qua Session API
        │    └→ emit.forEach<String>(_gemmaService.generateWithSession(prompt))
        │    │    ├→ GemmaServiceImpl: addQueryChunk(prompt) → getResponseAsync() (timeout 120s)
@@ -136,7 +138,13 @@ maxTokens: 2048 (kGemmaMaxTokens trong model_constants.dart)
 Timeout: 120s
 Exceptions: ModelNotLoadedException, ModelTimeoutException
 
-Legacy generateStream(prompt) / generate(prompt) vẫn tồn tại nhưng không dùng trong ChatBloc.
+Legacy generateStream(prompt) / generate(prompt) vẫn tồn tại — dùng bởi SummaryService.
+
+⚠️ **LiteRT LM constraint (critical):** Chỉ support 1 conversation session tại 1 thời điểm.
+  - Legacy `generate()`/`generateStream()` gọi `_model!.createSession()` sẽ invalidate session chính ở FFI.
+  - **Fix:** `generate()` và `generateStream()` set `_session = null` trước `createSession()`.
+  - Hậu quả nếu không fix: `hasActiveSession` vẫn `true` ở Dart, nhưng FFI session đã chết → `Bad state: Session is closed`.
+  - ChatBloc có guard tại dòng 389: tự động recreate session nếu `!hasActiveSession`.
 
 Token estimator (lib/core/utils/token_estimator.dart):
   - estimateTokens(text): cho RAG chunks, question, summary (heuristic chars/2.5)
@@ -323,6 +331,12 @@ AppException (base)
 └── StorageException               → error, log
 ```
 
+### Runtime errors (non-AppException)
+```
+Bad state: Session is closed → FFI session bị invalidate bởi legacy `generate()` (SummaryService).
+  → Guarded bởi `hasActiveSession` check tại ChatBloc dòng 389 — tự động recreate session.
+```
+
 ---
 
 ## ChatBloc States
@@ -417,6 +431,7 @@ lib/
 | **RAG logic inline trong ChatBloc + chunk substring trimming** | Tách **RagService** (interface + impl) + **PromptBuilder** (interface + impl) + **RagContext** model. ChatBloc chỉ còn orchestration. Chunk trimming: `removeLast()` thay vì `substring()`. |
 | **PromptBuilder ordering sai (RAG trước History) + thiếu delimiter** | Sửa thành: System → Memories → Summary → `<end_of_turn>` → History → RAG (sát question) → Question. Thêm delimiter `=== ... ===` cho mỗi section. |
 | **Thiếu observability cho RAG pipeline — không biết retrieval quality** | Thêm **RagTelemetry** (timing, scores, chunks, budget, state) + **RagTelemetryAggregator** (health report, score histogram). Log mỗi query. |
+| **Bad state: Session is closed sau Auto Summary — không chat được lần 2** | `generate()` set `_session = null` trước `_model!.createSession()` — tránh dirty state. LiteRT LM chỉ support 1 session, legacy API invalidate session cũ. ChatBloc có guard recreate session (`if (!hasActiveSession) → _createGemmaSessionWithHistory()`). |
 
 ---
 
