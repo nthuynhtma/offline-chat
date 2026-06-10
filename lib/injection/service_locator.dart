@@ -9,6 +9,8 @@ import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
 import 'package:offline_chat/services/context/context_manager_service.dart';
+import 'package:offline_chat/services/memory_store/memory_store_service.dart';
+import 'package:offline_chat/services/memory_store/summary_service.dart';
 import 'package:offline_chat/services/export/export_session_service.dart';
 import 'package:offline_chat/services/gecko/gecko_retry_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
@@ -73,10 +75,23 @@ Future<void> setupLocator() async {
   );
 
   // ─── Context Manager ───────────────────────────────────────────────────────
+  // @Deprecated: Replaced by MemoryStoreService + SummaryService + Session API
   sl.registerLazySingleton<ContextManagerService>(
     () => ContextManagerService(
       sl<MessageRepository>(),
       sl<GemmaService>(),
+    ),
+  );
+
+  // ─── Memory Store ──────────────────────────────────────────────────────────
+  sl.registerLazySingleton<MemoryStoreService>(
+    () => MemoryStoreService(sl<AppDatabase>()),
+  );
+
+  sl.registerLazySingleton<SummaryService>(
+    () => SummaryService(
+      sl<GemmaService>(),
+      sl<MemoryStoreService>(),
     ),
   );
 
@@ -103,6 +118,8 @@ Future<void> setupLocator() async {
       geckoService: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
       modelBloc: sl<ModelBloc>(),
+      memoryStore: sl<MemoryStoreService>(),
+      summaryService: sl<SummaryService>(),
     ),
   );
 

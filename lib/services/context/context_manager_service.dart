@@ -19,6 +19,9 @@ class _SummaryCache {
   });
 }
 
+/// @Deprecated Replaced by Session API + MemoryStoreService + SummaryService.
+/// Kept for backward compatibility, will be removed in a future cleanup.
+@Deprecated('Use MemoryStoreService + SummaryService + Session API instead')
 class ContextManagerService {
   final MessageRepository _messageRepo;
   final GemmaService? _gemmaService; // Optional để summarize

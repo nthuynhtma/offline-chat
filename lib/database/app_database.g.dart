@@ -1603,6 +1603,679 @@ class VectorsCompanion extends UpdateCompanion<Vector> {
   }
 }
 
+class $SessionMemoryTable extends SessionMemory
+    with TableInfo<$SessionMemoryTable, SessionMemoryData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SessionMemoryTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: true,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('REFERENCES sessions (id)'));
+  static const VerificationMeta _summaryMeta =
+      const VerificationMeta('summary');
+  @override
+  late final GeneratedColumn<String> summary = GeneratedColumn<String>(
+      'summary', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _summaryVersionMeta =
+      const VerificationMeta('summaryVersion');
+  @override
+  late final GeneratedColumn<int> summaryVersion = GeneratedColumn<int>(
+      'summary_version', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _msgCountMeta =
+      const VerificationMeta('msgCount');
+  @override
+  late final GeneratedColumn<int> msgCount = GeneratedColumn<int>(
+      'msg_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _estTokensMeta =
+      const VerificationMeta('estTokens');
+  @override
+  late final GeneratedColumn<int> estTokens = GeneratedColumn<int>(
+      'est_tokens', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _runningTokenCountMeta =
+      const VerificationMeta('runningTokenCount');
+  @override
+  late final GeneratedColumn<int> runningTokenCount = GeneratedColumn<int>(
+      'running_token_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns => [
+        sessionId,
+        summary,
+        summaryVersion,
+        msgCount,
+        estTokens,
+        runningTokenCount,
+        updatedAt
+      ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'session_memory';
+  @override
+  VerificationContext validateIntegrity(Insertable<SessionMemoryData> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('summary')) {
+      context.handle(_summaryMeta,
+          summary.isAcceptableOrUnknown(data['summary']!, _summaryMeta));
+    }
+    if (data.containsKey('summary_version')) {
+      context.handle(
+          _summaryVersionMeta,
+          summaryVersion.isAcceptableOrUnknown(
+              data['summary_version']!, _summaryVersionMeta));
+    }
+    if (data.containsKey('msg_count')) {
+      context.handle(_msgCountMeta,
+          msgCount.isAcceptableOrUnknown(data['msg_count']!, _msgCountMeta));
+    }
+    if (data.containsKey('est_tokens')) {
+      context.handle(_estTokensMeta,
+          estTokens.isAcceptableOrUnknown(data['est_tokens']!, _estTokensMeta));
+    }
+    if (data.containsKey('running_token_count')) {
+      context.handle(
+          _runningTokenCountMeta,
+          runningTokenCount.isAcceptableOrUnknown(
+              data['running_token_count']!, _runningTokenCountMeta));
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {sessionId};
+  @override
+  SessionMemoryData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SessionMemoryData(
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      summary: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}summary']),
+      summaryVersion: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}summary_version'])!,
+      msgCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}msg_count'])!,
+      estTokens: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}est_tokens'])!,
+      runningTokenCount: attachedDatabase.typeMapping.read(
+          DriftSqlType.int, data['${effectivePrefix}running_token_count'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
+    );
+  }
+
+  @override
+  $SessionMemoryTable createAlias(String alias) {
+    return $SessionMemoryTable(attachedDatabase, alias);
+  }
+}
+
+class SessionMemoryData extends DataClass
+    implements Insertable<SessionMemoryData> {
+  final String sessionId;
+  final String? summary;
+  final int summaryVersion;
+  final int msgCount;
+  final int estTokens;
+  final int runningTokenCount;
+  final DateTime updatedAt;
+  const SessionMemoryData(
+      {required this.sessionId,
+      this.summary,
+      required this.summaryVersion,
+      required this.msgCount,
+      required this.estTokens,
+      required this.runningTokenCount,
+      required this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['session_id'] = Variable<String>(sessionId);
+    if (!nullToAbsent || summary != null) {
+      map['summary'] = Variable<String>(summary);
+    }
+    map['summary_version'] = Variable<int>(summaryVersion);
+    map['msg_count'] = Variable<int>(msgCount);
+    map['est_tokens'] = Variable<int>(estTokens);
+    map['running_token_count'] = Variable<int>(runningTokenCount);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  SessionMemoryCompanion toCompanion(bool nullToAbsent) {
+    return SessionMemoryCompanion(
+      sessionId: Value(sessionId),
+      summary: summary == null && nullToAbsent
+          ? const Value.absent()
+          : Value(summary),
+      summaryVersion: Value(summaryVersion),
+      msgCount: Value(msgCount),
+      estTokens: Value(estTokens),
+      runningTokenCount: Value(runningTokenCount),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory SessionMemoryData.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SessionMemoryData(
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      summary: serializer.fromJson<String?>(json['summary']),
+      summaryVersion: serializer.fromJson<int>(json['summaryVersion']),
+      msgCount: serializer.fromJson<int>(json['msgCount']),
+      estTokens: serializer.fromJson<int>(json['estTokens']),
+      runningTokenCount: serializer.fromJson<int>(json['runningTokenCount']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'sessionId': serializer.toJson<String>(sessionId),
+      'summary': serializer.toJson<String?>(summary),
+      'summaryVersion': serializer.toJson<int>(summaryVersion),
+      'msgCount': serializer.toJson<int>(msgCount),
+      'estTokens': serializer.toJson<int>(estTokens),
+      'runningTokenCount': serializer.toJson<int>(runningTokenCount),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  SessionMemoryData copyWith(
+          {String? sessionId,
+          Value<String?> summary = const Value.absent(),
+          int? summaryVersion,
+          int? msgCount,
+          int? estTokens,
+          int? runningTokenCount,
+          DateTime? updatedAt}) =>
+      SessionMemoryData(
+        sessionId: sessionId ?? this.sessionId,
+        summary: summary.present ? summary.value : this.summary,
+        summaryVersion: summaryVersion ?? this.summaryVersion,
+        msgCount: msgCount ?? this.msgCount,
+        estTokens: estTokens ?? this.estTokens,
+        runningTokenCount: runningTokenCount ?? this.runningTokenCount,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+  SessionMemoryData copyWithCompanion(SessionMemoryCompanion data) {
+    return SessionMemoryData(
+      sessionId: data.sessionId.present ? data.sessionId.value : this.sessionId,
+      summary: data.summary.present ? data.summary.value : this.summary,
+      summaryVersion: data.summaryVersion.present
+          ? data.summaryVersion.value
+          : this.summaryVersion,
+      msgCount: data.msgCount.present ? data.msgCount.value : this.msgCount,
+      estTokens: data.estTokens.present ? data.estTokens.value : this.estTokens,
+      runningTokenCount: data.runningTokenCount.present
+          ? data.runningTokenCount.value
+          : this.runningTokenCount,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionMemoryData(')
+          ..write('sessionId: $sessionId, ')
+          ..write('summary: $summary, ')
+          ..write('summaryVersion: $summaryVersion, ')
+          ..write('msgCount: $msgCount, ')
+          ..write('estTokens: $estTokens, ')
+          ..write('runningTokenCount: $runningTokenCount, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(sessionId, summary, summaryVersion, msgCount,
+      estTokens, runningTokenCount, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SessionMemoryData &&
+          other.sessionId == this.sessionId &&
+          other.summary == this.summary &&
+          other.summaryVersion == this.summaryVersion &&
+          other.msgCount == this.msgCount &&
+          other.estTokens == this.estTokens &&
+          other.runningTokenCount == this.runningTokenCount &&
+          other.updatedAt == this.updatedAt);
+}
+
+class SessionMemoryCompanion extends UpdateCompanion<SessionMemoryData> {
+  final Value<String> sessionId;
+  final Value<String?> summary;
+  final Value<int> summaryVersion;
+  final Value<int> msgCount;
+  final Value<int> estTokens;
+  final Value<int> runningTokenCount;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const SessionMemoryCompanion({
+    this.sessionId = const Value.absent(),
+    this.summary = const Value.absent(),
+    this.summaryVersion = const Value.absent(),
+    this.msgCount = const Value.absent(),
+    this.estTokens = const Value.absent(),
+    this.runningTokenCount = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SessionMemoryCompanion.insert({
+    required String sessionId,
+    this.summary = const Value.absent(),
+    this.summaryVersion = const Value.absent(),
+    this.msgCount = const Value.absent(),
+    this.estTokens = const Value.absent(),
+    this.runningTokenCount = const Value.absent(),
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  })  : sessionId = Value(sessionId),
+        updatedAt = Value(updatedAt);
+  static Insertable<SessionMemoryData> custom({
+    Expression<String>? sessionId,
+    Expression<String>? summary,
+    Expression<int>? summaryVersion,
+    Expression<int>? msgCount,
+    Expression<int>? estTokens,
+    Expression<int>? runningTokenCount,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (sessionId != null) 'session_id': sessionId,
+      if (summary != null) 'summary': summary,
+      if (summaryVersion != null) 'summary_version': summaryVersion,
+      if (msgCount != null) 'msg_count': msgCount,
+      if (estTokens != null) 'est_tokens': estTokens,
+      if (runningTokenCount != null) 'running_token_count': runningTokenCount,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SessionMemoryCompanion copyWith(
+      {Value<String>? sessionId,
+      Value<String?>? summary,
+      Value<int>? summaryVersion,
+      Value<int>? msgCount,
+      Value<int>? estTokens,
+      Value<int>? runningTokenCount,
+      Value<DateTime>? updatedAt,
+      Value<int>? rowid}) {
+    return SessionMemoryCompanion(
+      sessionId: sessionId ?? this.sessionId,
+      summary: summary ?? this.summary,
+      summaryVersion: summaryVersion ?? this.summaryVersion,
+      msgCount: msgCount ?? this.msgCount,
+      estTokens: estTokens ?? this.estTokens,
+      runningTokenCount: runningTokenCount ?? this.runningTokenCount,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (summary.present) {
+      map['summary'] = Variable<String>(summary.value);
+    }
+    if (summaryVersion.present) {
+      map['summary_version'] = Variable<int>(summaryVersion.value);
+    }
+    if (msgCount.present) {
+      map['msg_count'] = Variable<int>(msgCount.value);
+    }
+    if (estTokens.present) {
+      map['est_tokens'] = Variable<int>(estTokens.value);
+    }
+    if (runningTokenCount.present) {
+      map['running_token_count'] = Variable<int>(runningTokenCount.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionMemoryCompanion(')
+          ..write('sessionId: $sessionId, ')
+          ..write('summary: $summary, ')
+          ..write('summaryVersion: $summaryVersion, ')
+          ..write('msgCount: $msgCount, ')
+          ..write('estTokens: $estTokens, ')
+          ..write('runningTokenCount: $runningTokenCount, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $UserMemoryTable extends UserMemory
+    with TableInfo<$UserMemoryTable, UserMemoryData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $UserMemoryTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _namespaceMeta =
+      const VerificationMeta('namespace');
+  @override
+  late final GeneratedColumn<String> namespace = GeneratedColumn<String>(
+      'namespace', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _keyMeta = const VerificationMeta('key');
+  @override
+  late final GeneratedColumn<String> key = GeneratedColumn<String>(
+      'key', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _valueMeta = const VerificationMeta('value');
+  @override
+  late final GeneratedColumn<String> value = GeneratedColumn<String>(
+      'value', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns => [namespace, key, value, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'user_memory';
+  @override
+  VerificationContext validateIntegrity(Insertable<UserMemoryData> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('namespace')) {
+      context.handle(_namespaceMeta,
+          namespace.isAcceptableOrUnknown(data['namespace']!, _namespaceMeta));
+    } else if (isInserting) {
+      context.missing(_namespaceMeta);
+    }
+    if (data.containsKey('key')) {
+      context.handle(
+          _keyMeta, key.isAcceptableOrUnknown(data['key']!, _keyMeta));
+    } else if (isInserting) {
+      context.missing(_keyMeta);
+    }
+    if (data.containsKey('value')) {
+      context.handle(
+          _valueMeta, value.isAcceptableOrUnknown(data['value']!, _valueMeta));
+    } else if (isInserting) {
+      context.missing(_valueMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {namespace, key};
+  @override
+  UserMemoryData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return UserMemoryData(
+      namespace: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}namespace'])!,
+      key: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}key'])!,
+      value: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}value'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
+    );
+  }
+
+  @override
+  $UserMemoryTable createAlias(String alias) {
+    return $UserMemoryTable(attachedDatabase, alias);
+  }
+}
+
+class UserMemoryData extends DataClass implements Insertable<UserMemoryData> {
+  final String namespace;
+  final String key;
+  final String value;
+  final DateTime updatedAt;
+  const UserMemoryData(
+      {required this.namespace,
+      required this.key,
+      required this.value,
+      required this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['namespace'] = Variable<String>(namespace);
+    map['key'] = Variable<String>(key);
+    map['value'] = Variable<String>(value);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  UserMemoryCompanion toCompanion(bool nullToAbsent) {
+    return UserMemoryCompanion(
+      namespace: Value(namespace),
+      key: Value(key),
+      value: Value(value),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory UserMemoryData.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return UserMemoryData(
+      namespace: serializer.fromJson<String>(json['namespace']),
+      key: serializer.fromJson<String>(json['key']),
+      value: serializer.fromJson<String>(json['value']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'namespace': serializer.toJson<String>(namespace),
+      'key': serializer.toJson<String>(key),
+      'value': serializer.toJson<String>(value),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  UserMemoryData copyWith(
+          {String? namespace,
+          String? key,
+          String? value,
+          DateTime? updatedAt}) =>
+      UserMemoryData(
+        namespace: namespace ?? this.namespace,
+        key: key ?? this.key,
+        value: value ?? this.value,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+  UserMemoryData copyWithCompanion(UserMemoryCompanion data) {
+    return UserMemoryData(
+      namespace: data.namespace.present ? data.namespace.value : this.namespace,
+      key: data.key.present ? data.key.value : this.key,
+      value: data.value.present ? data.value.value : this.value,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('UserMemoryData(')
+          ..write('namespace: $namespace, ')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(namespace, key, value, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is UserMemoryData &&
+          other.namespace == this.namespace &&
+          other.key == this.key &&
+          other.value == this.value &&
+          other.updatedAt == this.updatedAt);
+}
+
+class UserMemoryCompanion extends UpdateCompanion<UserMemoryData> {
+  final Value<String> namespace;
+  final Value<String> key;
+  final Value<String> value;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const UserMemoryCompanion({
+    this.namespace = const Value.absent(),
+    this.key = const Value.absent(),
+    this.value = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  UserMemoryCompanion.insert({
+    required String namespace,
+    required String key,
+    required String value,
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  })  : namespace = Value(namespace),
+        key = Value(key),
+        value = Value(value),
+        updatedAt = Value(updatedAt);
+  static Insertable<UserMemoryData> custom({
+    Expression<String>? namespace,
+    Expression<String>? key,
+    Expression<String>? value,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (namespace != null) 'namespace': namespace,
+      if (key != null) 'key': key,
+      if (value != null) 'value': value,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  UserMemoryCompanion copyWith(
+      {Value<String>? namespace,
+      Value<String>? key,
+      Value<String>? value,
+      Value<DateTime>? updatedAt,
+      Value<int>? rowid}) {
+    return UserMemoryCompanion(
+      namespace: namespace ?? this.namespace,
+      key: key ?? this.key,
+      value: value ?? this.value,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (namespace.present) {
+      map['namespace'] = Variable<String>(namespace.value);
+    }
+    if (key.present) {
+      map['key'] = Variable<String>(key.value);
+    }
+    if (value.present) {
+      map['value'] = Variable<String>(value.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('UserMemoryCompanion(')
+          ..write('namespace: $namespace, ')
+          ..write('key: $key, ')
+          ..write('value: $value, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -1611,17 +2284,29 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $DocumentsTable documents = $DocumentsTable(this);
   late final $ChunksTable chunks = $ChunksTable(this);
   late final $VectorsTable vectors = $VectorsTable(this);
+  late final $SessionMemoryTable sessionMemory = $SessionMemoryTable(this);
+  late final $UserMemoryTable userMemory = $UserMemoryTable(this);
   late final SessionsDao sessionsDao = SessionsDao(this as AppDatabase);
   late final MessagesDao messagesDao = MessagesDao(this as AppDatabase);
   late final DocumentsDao documentsDao = DocumentsDao(this as AppDatabase);
   late final ChunksDao chunksDao = ChunksDao(this as AppDatabase);
   late final VectorsDao vectorsDao = VectorsDao(this as AppDatabase);
+  late final SessionMemoryDao sessionMemoryDao =
+      SessionMemoryDao(this as AppDatabase);
+  late final UserMemoryDao userMemoryDao = UserMemoryDao(this as AppDatabase);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
-  List<DatabaseSchemaEntity> get allSchemaEntities =>
-      [sessions, messages, documents, chunks, vectors];
+  List<DatabaseSchemaEntity> get allSchemaEntities => [
+        sessions,
+        messages,
+        documents,
+        chunks,
+        vectors,
+        sessionMemory,
+        userMemory
+      ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules(
         [
@@ -1676,6 +2361,21 @@ final class $$SessionsTableReferences
     return ProcessedTableManager(
         manager.$state.copyWith(prefetchedData: cache));
   }
+
+  static MultiTypedResultKey<$SessionMemoryTable, List<SessionMemoryData>>
+      _sessionMemoryRefsTable(_$AppDatabase db) =>
+          MultiTypedResultKey.fromTable(db.sessionMemory,
+              aliasName: $_aliasNameGenerator(
+                  db.sessions.id, db.sessionMemory.sessionId));
+
+  $$SessionMemoryTableProcessedTableManager get sessionMemoryRefs {
+    final manager = $$SessionMemoryTableTableManager($_db, $_db.sessionMemory)
+        .filter((f) => f.sessionId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_sessionMemoryRefsTable($_db));
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: cache));
+  }
 }
 
 class $$SessionsTableFilterComposer
@@ -1712,6 +2412,27 @@ class $$SessionsTableFilterComposer
             $$MessagesTableFilterComposer(
               $db: $db,
               $table: $db.messages,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
+
+  Expression<bool> sessionMemoryRefs(
+      Expression<bool> Function($$SessionMemoryTableFilterComposer f) f) {
+    final $$SessionMemoryTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.sessionMemory,
+        getReferencedColumn: (t) => t.sessionId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionMemoryTableFilterComposer(
+              $db: $db,
+              $table: $db.sessionMemory,
               $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
               joinBuilder: joinBuilder,
               $removeJoinBuilderFromRootComposer:
@@ -1784,6 +2505,27 @@ class $$SessionsTableAnnotationComposer
             ));
     return f(composer);
   }
+
+  Expression<T> sessionMemoryRefs<T extends Object>(
+      Expression<T> Function($$SessionMemoryTableAnnotationComposer a) f) {
+    final $$SessionMemoryTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.sessionMemory,
+        getReferencedColumn: (t) => t.sessionId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionMemoryTableAnnotationComposer(
+              $db: $db,
+              $table: $db.sessionMemory,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
 }
 
 class $$SessionsTableTableManager extends RootTableManager<
@@ -1797,7 +2539,7 @@ class $$SessionsTableTableManager extends RootTableManager<
     $$SessionsTableUpdateCompanionBuilder,
     (Session, $$SessionsTableReferences),
     Session,
-    PrefetchHooks Function({bool messagesRefs})> {
+    PrefetchHooks Function({bool messagesRefs, bool sessionMemoryRefs})> {
   $$SessionsTableTableManager(_$AppDatabase db, $SessionsTable table)
       : super(TableManagerState(
           db: db,
@@ -1840,10 +2582,14 @@ class $$SessionsTableTableManager extends RootTableManager<
               .map((e) =>
                   (e.readTable(table), $$SessionsTableReferences(db, table, e)))
               .toList(),
-          prefetchHooksCallback: ({messagesRefs = false}) {
+          prefetchHooksCallback: (
+              {messagesRefs = false, sessionMemoryRefs = false}) {
             return PrefetchHooks(
               db: db,
-              explicitlyWatchedTables: [if (messagesRefs) db.messages],
+              explicitlyWatchedTables: [
+                if (messagesRefs) db.messages,
+                if (sessionMemoryRefs) db.sessionMemory
+              ],
               addJoins: null,
               getPrefetchedDataCallback: (items) async {
                 return [
@@ -1855,6 +2601,19 @@ class $$SessionsTableTableManager extends RootTableManager<
                         managerFromTypedResult: (p0) =>
                             $$SessionsTableReferences(db, table, p0)
                                 .messagesRefs,
+                        referencedItemsForCurrentItem:
+                            (item, referencedItems) => referencedItems
+                                .where((e) => e.sessionId == item.id),
+                        typedResults: items),
+                  if (sessionMemoryRefs)
+                    await $_getPrefetchedData<Session, $SessionsTable,
+                            SessionMemoryData>(
+                        currentTable: table,
+                        referencedTable: $$SessionsTableReferences
+                            ._sessionMemoryRefsTable(db),
+                        managerFromTypedResult: (p0) =>
+                            $$SessionsTableReferences(db, table, p0)
+                                .sessionMemoryRefs,
                         referencedItemsForCurrentItem:
                             (item, referencedItems) => referencedItems
                                 .where((e) => e.sessionId == item.id),
@@ -1877,7 +2636,7 @@ typedef $$SessionsTableProcessedTableManager = ProcessedTableManager<
     $$SessionsTableUpdateCompanionBuilder,
     (Session, $$SessionsTableReferences),
     Session,
-    PrefetchHooks Function({bool messagesRefs})>;
+    PrefetchHooks Function({bool messagesRefs, bool sessionMemoryRefs})>;
 typedef $$MessagesTableCreateCompanionBuilder = MessagesCompanion Function({
   required String id,
   required String sessionId,
@@ -3039,6 +3798,472 @@ typedef $$VectorsTableProcessedTableManager = ProcessedTableManager<
     (Vector, $$VectorsTableReferences),
     Vector,
     PrefetchHooks Function({bool chunkId})>;
+typedef $$SessionMemoryTableCreateCompanionBuilder = SessionMemoryCompanion
+    Function({
+  required String sessionId,
+  Value<String?> summary,
+  Value<int> summaryVersion,
+  Value<int> msgCount,
+  Value<int> estTokens,
+  Value<int> runningTokenCount,
+  required DateTime updatedAt,
+  Value<int> rowid,
+});
+typedef $$SessionMemoryTableUpdateCompanionBuilder = SessionMemoryCompanion
+    Function({
+  Value<String> sessionId,
+  Value<String?> summary,
+  Value<int> summaryVersion,
+  Value<int> msgCount,
+  Value<int> estTokens,
+  Value<int> runningTokenCount,
+  Value<DateTime> updatedAt,
+  Value<int> rowid,
+});
+
+final class $$SessionMemoryTableReferences extends BaseReferences<_$AppDatabase,
+    $SessionMemoryTable, SessionMemoryData> {
+  $$SessionMemoryTableReferences(
+      super.$_db, super.$_table, super.$_typedResult);
+
+  static $SessionsTable _sessionIdTable(_$AppDatabase db) =>
+      db.sessions.createAlias(
+          $_aliasNameGenerator(db.sessionMemory.sessionId, db.sessions.id));
+
+  $$SessionsTableProcessedTableManager get sessionId {
+    final $_column = $_itemColumn<String>('session_id')!;
+
+    final manager = $$SessionsTableTableManager($_db, $_db.sessions)
+        .filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_sessionIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: [item]));
+  }
+}
+
+class $$SessionMemoryTableFilterComposer
+    extends Composer<_$AppDatabase, $SessionMemoryTable> {
+  $$SessionMemoryTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get summary => $composableBuilder(
+      column: $table.summary, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get summaryVersion => $composableBuilder(
+      column: $table.summaryVersion,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get msgCount => $composableBuilder(
+      column: $table.msgCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get estTokens => $composableBuilder(
+      column: $table.estTokens, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get runningTokenCount => $composableBuilder(
+      column: $table.runningTokenCount,
+      builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
+
+  $$SessionsTableFilterComposer get sessionId {
+    final $$SessionsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableFilterComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionMemoryTableOrderingComposer
+    extends Composer<_$AppDatabase, $SessionMemoryTable> {
+  $$SessionMemoryTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get summary => $composableBuilder(
+      column: $table.summary, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get summaryVersion => $composableBuilder(
+      column: $table.summaryVersion,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get msgCount => $composableBuilder(
+      column: $table.msgCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get estTokens => $composableBuilder(
+      column: $table.estTokens, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get runningTokenCount => $composableBuilder(
+      column: $table.runningTokenCount,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+
+  $$SessionsTableOrderingComposer get sessionId {
+    final $$SessionsTableOrderingComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableOrderingComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionMemoryTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SessionMemoryTable> {
+  $$SessionMemoryTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get summary =>
+      $composableBuilder(column: $table.summary, builder: (column) => column);
+
+  GeneratedColumn<int> get summaryVersion => $composableBuilder(
+      column: $table.summaryVersion, builder: (column) => column);
+
+  GeneratedColumn<int> get msgCount =>
+      $composableBuilder(column: $table.msgCount, builder: (column) => column);
+
+  GeneratedColumn<int> get estTokens =>
+      $composableBuilder(column: $table.estTokens, builder: (column) => column);
+
+  GeneratedColumn<int> get runningTokenCount => $composableBuilder(
+      column: $table.runningTokenCount, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  $$SessionsTableAnnotationComposer get sessionId {
+    final $$SessionsTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableAnnotationComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionMemoryTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $SessionMemoryTable,
+    SessionMemoryData,
+    $$SessionMemoryTableFilterComposer,
+    $$SessionMemoryTableOrderingComposer,
+    $$SessionMemoryTableAnnotationComposer,
+    $$SessionMemoryTableCreateCompanionBuilder,
+    $$SessionMemoryTableUpdateCompanionBuilder,
+    (SessionMemoryData, $$SessionMemoryTableReferences),
+    SessionMemoryData,
+    PrefetchHooks Function({bool sessionId})> {
+  $$SessionMemoryTableTableManager(_$AppDatabase db, $SessionMemoryTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SessionMemoryTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SessionMemoryTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SessionMemoryTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> sessionId = const Value.absent(),
+            Value<String?> summary = const Value.absent(),
+            Value<int> summaryVersion = const Value.absent(),
+            Value<int> msgCount = const Value.absent(),
+            Value<int> estTokens = const Value.absent(),
+            Value<int> runningTokenCount = const Value.absent(),
+            Value<DateTime> updatedAt = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              SessionMemoryCompanion(
+            sessionId: sessionId,
+            summary: summary,
+            summaryVersion: summaryVersion,
+            msgCount: msgCount,
+            estTokens: estTokens,
+            runningTokenCount: runningTokenCount,
+            updatedAt: updatedAt,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String sessionId,
+            Value<String?> summary = const Value.absent(),
+            Value<int> summaryVersion = const Value.absent(),
+            Value<int> msgCount = const Value.absent(),
+            Value<int> estTokens = const Value.absent(),
+            Value<int> runningTokenCount = const Value.absent(),
+            required DateTime updatedAt,
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              SessionMemoryCompanion.insert(
+            sessionId: sessionId,
+            summary: summary,
+            summaryVersion: summaryVersion,
+            msgCount: msgCount,
+            estTokens: estTokens,
+            runningTokenCount: runningTokenCount,
+            updatedAt: updatedAt,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (
+                    e.readTable(table),
+                    $$SessionMemoryTableReferences(db, table, e)
+                  ))
+              .toList(),
+          prefetchHooksCallback: ({sessionId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins: <
+                  T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic>>(state) {
+                if (sessionId) {
+                  state = state.withJoin(
+                    currentTable: table,
+                    currentColumn: table.sessionId,
+                    referencedTable:
+                        $$SessionMemoryTableReferences._sessionIdTable(db),
+                    referencedColumn:
+                        $$SessionMemoryTableReferences._sessionIdTable(db).id,
+                  ) as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ));
+}
+
+typedef $$SessionMemoryTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $SessionMemoryTable,
+    SessionMemoryData,
+    $$SessionMemoryTableFilterComposer,
+    $$SessionMemoryTableOrderingComposer,
+    $$SessionMemoryTableAnnotationComposer,
+    $$SessionMemoryTableCreateCompanionBuilder,
+    $$SessionMemoryTableUpdateCompanionBuilder,
+    (SessionMemoryData, $$SessionMemoryTableReferences),
+    SessionMemoryData,
+    PrefetchHooks Function({bool sessionId})>;
+typedef $$UserMemoryTableCreateCompanionBuilder = UserMemoryCompanion Function({
+  required String namespace,
+  required String key,
+  required String value,
+  required DateTime updatedAt,
+  Value<int> rowid,
+});
+typedef $$UserMemoryTableUpdateCompanionBuilder = UserMemoryCompanion Function({
+  Value<String> namespace,
+  Value<String> key,
+  Value<String> value,
+  Value<DateTime> updatedAt,
+  Value<int> rowid,
+});
+
+class $$UserMemoryTableFilterComposer
+    extends Composer<_$AppDatabase, $UserMemoryTable> {
+  $$UserMemoryTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get namespace => $composableBuilder(
+      column: $table.namespace, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get key => $composableBuilder(
+      column: $table.key, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get value => $composableBuilder(
+      column: $table.value, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnFilters(column));
+}
+
+class $$UserMemoryTableOrderingComposer
+    extends Composer<_$AppDatabase, $UserMemoryTable> {
+  $$UserMemoryTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get namespace => $composableBuilder(
+      column: $table.namespace, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get key => $composableBuilder(
+      column: $table.key, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get value => $composableBuilder(
+      column: $table.value, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+      column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+}
+
+class $$UserMemoryTableAnnotationComposer
+    extends Composer<_$AppDatabase, $UserMemoryTable> {
+  $$UserMemoryTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get namespace =>
+      $composableBuilder(column: $table.namespace, builder: (column) => column);
+
+  GeneratedColumn<String> get key =>
+      $composableBuilder(column: $table.key, builder: (column) => column);
+
+  GeneratedColumn<String> get value =>
+      $composableBuilder(column: $table.value, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$UserMemoryTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $UserMemoryTable,
+    UserMemoryData,
+    $$UserMemoryTableFilterComposer,
+    $$UserMemoryTableOrderingComposer,
+    $$UserMemoryTableAnnotationComposer,
+    $$UserMemoryTableCreateCompanionBuilder,
+    $$UserMemoryTableUpdateCompanionBuilder,
+    (
+      UserMemoryData,
+      BaseReferences<_$AppDatabase, $UserMemoryTable, UserMemoryData>
+    ),
+    UserMemoryData,
+    PrefetchHooks Function()> {
+  $$UserMemoryTableTableManager(_$AppDatabase db, $UserMemoryTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$UserMemoryTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$UserMemoryTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$UserMemoryTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> namespace = const Value.absent(),
+            Value<String> key = const Value.absent(),
+            Value<String> value = const Value.absent(),
+            Value<DateTime> updatedAt = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              UserMemoryCompanion(
+            namespace: namespace,
+            key: key,
+            value: value,
+            updatedAt: updatedAt,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String namespace,
+            required String key,
+            required String value,
+            required DateTime updatedAt,
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              UserMemoryCompanion.insert(
+            namespace: namespace,
+            key: key,
+            value: value,
+            updatedAt: updatedAt,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$UserMemoryTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $UserMemoryTable,
+    UserMemoryData,
+    $$UserMemoryTableFilterComposer,
+    $$UserMemoryTableOrderingComposer,
+    $$UserMemoryTableAnnotationComposer,
+    $$UserMemoryTableCreateCompanionBuilder,
+    $$UserMemoryTableUpdateCompanionBuilder,
+    (
+      UserMemoryData,
+      BaseReferences<_$AppDatabase, $UserMemoryTable, UserMemoryData>
+    ),
+    UserMemoryData,
+    PrefetchHooks Function()>;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3053,6 +4278,10 @@ class $AppDatabaseManager {
       $$ChunksTableTableManager(_db, _db.chunks);
   $$VectorsTableTableManager get vectors =>
       $$VectorsTableTableManager(_db, _db.vectors);
+  $$SessionMemoryTableTableManager get sessionMemory =>
+      $$SessionMemoryTableTableManager(_db, _db.sessionMemory);
+  $$UserMemoryTableTableManager get userMemory =>
+      $$UserMemoryTableTableManager(_db, _db.userMemory);
 }
 
 mixin _$SessionsDaoMixin on DatabaseAccessor<AppDatabase> {
@@ -3125,4 +4354,31 @@ class VectorsDaoManager {
       $$ChunksTableTableManager(_db.attachedDatabase, _db.chunks);
   $$VectorsTableTableManager get vectors =>
       $$VectorsTableTableManager(_db.attachedDatabase, _db.vectors);
+}
+
+mixin _$SessionMemoryDaoMixin on DatabaseAccessor<AppDatabase> {
+  $SessionsTable get sessions => attachedDatabase.sessions;
+  $SessionMemoryTable get sessionMemory => attachedDatabase.sessionMemory;
+  SessionMemoryDaoManager get managers => SessionMemoryDaoManager(this);
+}
+
+class SessionMemoryDaoManager {
+  final _$SessionMemoryDaoMixin _db;
+  SessionMemoryDaoManager(this._db);
+  $$SessionsTableTableManager get sessions =>
+      $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
+  $$SessionMemoryTableTableManager get sessionMemory =>
+      $$SessionMemoryTableTableManager(_db.attachedDatabase, _db.sessionMemory);
+}
+
+mixin _$UserMemoryDaoMixin on DatabaseAccessor<AppDatabase> {
+  $UserMemoryTable get userMemory => attachedDatabase.userMemory;
+  UserMemoryDaoManager get managers => UserMemoryDaoManager(this);
+}
+
+class UserMemoryDaoManager {
+  final _$UserMemoryDaoMixin _db;
+  UserMemoryDaoManager(this._db);
+  $$UserMemoryTableTableManager get userMemory =>
+      $$UserMemoryTableTableManager(_db.attachedDatabase, _db.userMemory);
 }

@@ -16,6 +16,9 @@ import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/services/memory_store/memory_store_service.dart';
+import 'package:offline_chat/services/memory_store/summary_service.dart';
+import 'package:offline_chat/services/memory_store/memory_prompt_formatter.dart';
 
 // Events
 sealed class ChatEvent extends Equatable {
@@ -125,6 +128,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   final GeckoService _geckoService;
   final VectorStoreService _vectorStore;
   final ModelBloc _modelBloc;
+  final MemoryStoreService _memoryStore;
+  final SummaryService _summaryService;
   final Uuid _uuid = const Uuid();
 
   String? _currentSessionId;
@@ -140,6 +145,12 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   /// true khi đang chờ model init (đã bỏ qua SendMessageRequested).
   bool _isWaitingForModel = false;
 
+  /// Lock tránh chạy đồng thời 2 summarize jobs.
+  bool _isSummarizing = false;
+
+  /// Budget config (tính theo context window runtime).
+  late final MemoryBudgetConfig _memoryBudget;
+
   ChatBloc({
     required MessageRepository messageRepo,
     required SessionRepository sessionRepo,
@@ -147,12 +158,18 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     required GeckoService geckoService,
     required VectorStoreService vectorStore,
     required ModelBloc modelBloc,
+    required MemoryStoreService memoryStore,
+    required SummaryService summaryService,
+    int? contextWindow,
   })  : _messageRepo = messageRepo,
         _sessionRepo = sessionRepo,
         _gemmaService = gemmaService,
         _geckoService = geckoService,
         _vectorStore = vectorStore,
         _modelBloc = modelBloc,
+        _memoryStore = memoryStore,
+        _summaryService = summaryService,
+        _memoryBudget = MemoryBudgetConfig(contextWindow: contextWindow),
         super(const ChatInitial()) {
     on<SessionInitialized>(_onSessionInitialized);
     on<SendMessageRequested>(_onSendMessageRequested);
@@ -172,8 +189,49 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       final messages = await _messageRepo.getMessages(event.sessionId);
       _currentMessages = messages;
 
-      // Tạo Gemma session với system instruction
-      await _createGemmaSessionWithHistory(messages);
+      // Kiểm tra xem có SessionMemory (summary) không
+      final memoryRow = await _memoryStore.getSessionMemory(event.sessionId);
+
+      if (memoryRow?.summary != null && memoryRow!.summary!.isNotEmpty) {
+        // Có summary → inject vào system instruction + replay recent messages
+        final userMemories = await _memoryStore.getAllUserMemories();
+        final userMemoryList = <({String nspace, String key, String value})>[];
+        for (final m in userMemories) {
+          userMemoryList.add((nspace: m.namespace, key: m.key, value: m.value));
+        }
+
+        final systemInstruction = MemoryPromptFormatter.build(
+          summary: memoryRow.summary,
+          userMemories: userMemoryList,
+        );
+
+        await _gemmaService.createSession(
+          systemInstruction: systemInstruction,
+        );
+        log_util.log.i('🧠 [Session] Created with summary (v${memoryRow.summaryVersion}, ~${memoryRow.estTokens}tok)');
+
+        // Replay N messages gần nhất (token-based, dùng recentConversationBudget)
+        final recentBudget = _memoryBudget.recentConversationBudget;
+        final recentMessages = <MessageModel>[];
+        var recentTokenSum = 0;
+        for (int i = messages.length - 1; i >= 0; i--) {
+          final msgToken = estimateMessageTokens(messages[i].content);
+          if (recentTokenSum + msgToken > recentBudget) break;
+          recentTokenSum += msgToken;
+          recentMessages.insert(0, messages[i]);
+        }
+
+        for (final msg in recentMessages) {
+          await _gemmaService.addHistoryMessage(
+            msg.role.name,
+            msg.content,
+          );
+        }
+        log_util.log.i('🔄 [Session] Replayed ${recentMessages.length} recent messages (~${recentTokenSum}tok budget=${recentBudget}tok)');
+      } else {
+        // Không có summary → replay history bình thường (token-budget)
+        await _createGemmaSessionWithHistory(messages);
+      }
 
       emit(ChatLoaded(messages));
     } catch (e) {
@@ -417,7 +475,11 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
         final finalMessages = <MessageModel>[...currentMessages, assistantMsg];
         _currentMessages = finalMessages;
-        log_util.log.i('✅ [SendMessage] Hoàn tất: ${currentMessages.length} messages, response=${_accumulatedText.length} chars');
+        log_util.log.i('✅ [SendMessage] Hoàn tất: ${finalMessages.length} messages, response=${_accumulatedText.length} chars');
+
+        // ─── Auto-summary trigger ──────────────────────────────────
+        _tryTriggerAutoSummary();
+
         emit(ChatLoaded(finalMessages));
       } else {
         log_util.log.w('⚠️ [SendMessage] Response rỗng hoặc có lỗi — không lưu assistant message');
@@ -562,6 +624,109 @@ Instructions:
       );
     }
     log_util.log.i('🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
+  }
+
+  // ─── Auto Summary ────────────────────────────────────────────────────
+
+  /// Kiểm tra điều kiện và trigger auto-summary (non-blocking).
+  void _tryTriggerAutoSummary() {
+    if (_isSummarizing) return;
+    if (!_gemmaService.isReady) return;
+    if (_currentSessionId == null) return;
+
+    // Tính runningTokenCount hiện tại
+    final newRunningCount = _currentMessages.fold<int>(
+      0,
+      (sum, m) => sum + estimateMessageTokens(m.content),
+    );
+
+    if (newRunningCount <= _memoryBudget.summaryTrigger) {
+      // Cập nhật runningTokenCount trong DB mà không trigger summarize
+      _memoryStore.updateRunningTokenCount(_currentSessionId!, newRunningCount);
+      return;
+    }
+
+    log_util.log.i('📝 [AutoSummary] Triggered: runningTokens=$newRunningCount > trigger=${_memoryBudget.summaryTrigger}');
+    unawaited(_runAutoSummary());
+  }
+
+  Future<void> _runAutoSummary() async {
+    if (_isSummarizing) return;
+    _isSummarizing = true;
+
+    try {
+      final sessionId = _currentSessionId;
+      if (sessionId == null) return;
+
+      // 1. Lấy old summary
+      final oldRow = await _memoryStore.getSessionMemory(sessionId);
+
+      // 2. Lấy messages từ lần summarize cuối (based on msgCount trong old summary)
+      final allMessages = await _messageRepo.getMessages(sessionId);
+      final oldMsgCount = oldRow?.msgCount ?? 0;
+      var newMessages = <MessageModel>[];
+      if (oldMsgCount < allMessages.length) {
+        newMessages = allMessages.sublist(oldMsgCount);
+      } else if (oldMsgCount == allMessages.length && oldMsgCount > 0) {
+        // Đã summarize hết rồi nhưng runningTokenCount reset → không cần summarize lại
+        log_util.log.i('📝 [AutoSummary] No new messages since last summary (msgCount=$oldMsgCount) — skipping');
+        return;
+      } else {
+        newMessages = allMessages;
+      }
+
+      if (newMessages.isEmpty && oldRow?.summary != null) {
+        log_util.log.i('📝 [AutoSummary] No new messages for this session — skipping');
+        return;
+      }
+
+      // 3. Incremental summarize
+      final summary = await _summaryService.incrementalSummarize(
+        oldSummary: oldRow?.summary,
+        newMessages: newMessages,
+      );
+
+      if (summary == null) {
+        log_util.log.w('⚠️ [AutoSummary] Summary returned null — skipping');
+        return;
+      }
+
+      // 4. Tính actual recent tokens (các message sẽ replay khi mở session)
+      final actualRecentTokens = _currentMessages.fold<int>(
+        0,
+        (sum, m) => sum + estimateMessageTokens(m.content),
+      );
+
+      final summaryTokens = estimateTokens(summary);
+      final newRunningCount = summaryTokens + actualRecentTokens;
+
+      // 5. Lưu SessionMemory
+      await _memoryStore.saveSessionMemory(
+        sessionId: sessionId,
+        summary: summary,
+        summaryVersion: (oldRow?.summaryVersion ?? 0) + 1,
+        msgCount: allMessages.length,
+        estTokens: summaryTokens,
+        runningTokenCount: newRunningCount,
+      );
+
+      log_util.log.i(
+        '📝 [AutoSummary] Done: '
+        'v${(oldRow?.summaryVersion ?? 0) + 1}, '
+        '~${summaryTokens}tok, '
+        'msgCount=${allMessages.length}, '
+        'runningTokenCount reset to $newRunningCount',
+      );
+
+      // 6. Extract user memory (nếu đến interval)
+      if ((oldRow?.summaryVersion ?? 0) % kUserMemoryExtractInterval == 0) {
+        unawaited(_summaryService.extractUserMemory(allMessages));
+      }
+    } catch (e) {
+      log_util.log.w('⚠️ [AutoSummary] Error: $e');
+    } finally {
+      _isSummarizing = false;
+    }
   }
 
   @override

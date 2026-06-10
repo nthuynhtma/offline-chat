@@ -3,7 +3,7 @@
 ## Mô tả dự án
 Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4-E2B (flutter_gemma ^0.16.4)** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
 
-**Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Gemma session được tạo khi vào chat, history được replay, mỗi turn chỉ gửi user message mới + RAG context. ChatBloc không còn phụ thuộc ContextManagerService/PromptBuilderService.
+**Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai — chat hàng trăm lượt, đóng app mở lại, tiếp tục hội thoại không cần giữ toàn bộ history trong context 2048 tokens.
 
 ---
 
@@ -178,6 +178,62 @@ Budget hiện tại đã chuyển sang ratio-based dynamic (trong chat_bloc.dart
 
 Các constants cũ (totalBudget=8000, ragBudget=4000, historyBudget=3000)
 đã bị xoá khỏi app_constants.dart do không còn phản ánh runtime thực tế.
+```
+
+### MemoryStoreService + SummaryService — Auto Summary + User Memory
+
+```
+Session API + Auto Summary + Persistent User Memory + RAG ≈ 95% production-ready.
+
+Kiến trúc:
+  Gemma Session
+      │
+      ▼
+  Recent Messages (token-based ~15% context)
+      │
+      ▼
+  Conversation Summary (incremental, session-specific, lưu DB)
+      │
+      ▼
+  Persistent User Memory (cross-session, namespace.key=value)
+      │
+      ▼
+  RAG Documents
+
+Database tables:
+  - SessionMemory: sessionId, summary, summaryVersion, msgCount, estTokens, runningTokenCount, updatedAt
+  - UserMemory: namespace, key, value, updatedAt (composite PK: namespace+key)
+
+MemoryBudgetConfig (dynamic theo context window):
+  - responseReserve = 25%
+  - systemBudget = 5%
+  - summaryBudget = 8%, clamp(100, 500)
+  - userMemoryBudget = 2%
+  - recentConversationBudget = 15%
+  - availableConversationBudget = contextWindow - response - system - summary - memory
+  - summaryTrigger = availableConversationBudget * 0.65
+
+Flow khi mở session:
+  1. Kiểm tra SessionMemory.summary
+  2. Nếu có → inject summary + user memory vào system instruction + replay recent messages (token-based)
+  3. Nếu không → replay history bình thường (35% context budget)
+
+Flow auto-summary (sau mỗi response):
+  1. _tryTriggerAutoSummary(): tính runningTokenCount, nếu > summaryTrigger → unawaited(_runAutoSummary())
+  2. _runAutoSummary(): lock _isSummarizing, incremental summarize (old summary + new messages)
+  3. Sau summarize: runningTokenCount = summaryTokens + actualRecentTokens
+  4. Extract user memory mỗi kUsersMemoryExtractInterval = 5 lần summarize
+
+Key files:
+  - lib/core/constants/model_constants.dart — MemoryBudgetConfig class
+  - lib/services/memory_store/memory_store_service.dart — CRUD SessionMemory + UserMemory
+  - lib/services/memory_store/summary_service.dart — Incremental summarize + extract user memory
+  - lib/services/memory_store/memory_prompt_formatter.dart — Build system instruction
+  - lib/features/chat/bloc/chat_bloc.dart — Inject summary, trigger summarize, _isSummarizing lock
+  - lib/database/tables/session_memory_table.dart — Table definition
+  - lib/database/tables/user_memory_table.dart — Table definition
+
+ContextManagerService: @Deprecated — giữ lại để tránh break build, sẽ cleanup sau.
 ```
 
 ### PromptBuilderService — KHÔNG dùng trong ChatBloc

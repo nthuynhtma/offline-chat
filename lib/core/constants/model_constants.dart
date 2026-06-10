@@ -25,3 +25,61 @@ const double kCharsPerToken = 2.5;
 
 /// Token overhead cho mỗi message khi replay vào session (role prefix e.g. "user: ")
 const int kRoleOverheadTokens = 5;
+
+/// === Memory budget ratios (dynamic theo context window) ===
+
+/// Tỉ lệ context reserved cho summary (8%)
+const double kSummaryBudgetRatio = 0.08;
+
+/// Tỉ lệ context dành cho recent conversation khi có summary (15%)
+const double kRecentConversationBudgetRatio = 0.15;
+
+/// Tỉ lệ context reserved cho user memory (2%)
+const double kUserMemoryBudgetRatio = 0.02;
+
+/// Trigger summarize khi running tokens chiếm 65% budget khả dụng (còn lại cho RAG)
+const double kSummaryTriggerRatio = 0.65;
+
+/// Số lần summarize để trigger extract user memory
+const int kUserMemoryExtractInterval = 5;
+
+/// Min/Max clamp cho summary budget
+const int kSummaryBudgetMin = 100;
+const int kSummaryBudgetMax = 500;
+
+/// Duration timeout cho summarize generation
+const int kSummaryTimeoutSeconds = 30;
+
+/// === Memory budget config (dynamic theo context window) ===
+
+class MemoryBudgetConfig {
+  final int contextWindow;
+
+  MemoryBudgetConfig({int? contextWindow})
+      : contextWindow = contextWindow ?? kGemmaMaxTokens;
+
+  // Các budget cố định
+  int get responseReserve => (contextWindow * kResponseBudgetRatio).round();
+  int get systemBudget => (contextWindow * kSystemBudgetRatio).round();
+
+  // Summary budget (clamped)
+  int get summaryBudget => (contextWindow * kSummaryBudgetRatio)
+      .round()
+      .clamp(kSummaryBudgetMin, kSummaryBudgetMax);
+
+  int get userMemoryBudget => (contextWindow * kUserMemoryBudgetRatio).round();
+  int get recentConversationBudget =>
+      (contextWindow * kRecentConversationBudgetRatio).round();
+
+  /// Budget khả dụng cho conversation (history + RAG) sau khi trừ reserves
+  int get availableConversationBudget =>
+      contextWindow -
+      responseReserve -
+      systemBudget -
+      summaryBudget -
+      userMemoryBudget;
+
+  /// Trigger summarize khi history tokens chiếm > 65% availableConversationBudget
+  int get summaryTrigger =>
+      (availableConversationBudget * kSummaryTriggerRatio).round();
+}
