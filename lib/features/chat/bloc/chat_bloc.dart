@@ -194,6 +194,11 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
       if (memoryRow?.summary != null && memoryRow!.summary!.isNotEmpty) {
         // Có summary → inject vào system instruction + replay recent messages
+        if (!_gemmaService.isReady) {
+          log_util.log.w('⚠️ [Session] Gemma chưa ready — skip session creation, load messages only');
+          emit(ChatLoaded(messages));
+          return;
+        }
         final userMemories = await _memoryStore.getAllUserMemories();
         final userMemoryList = <({String nspace, String key, String value})>[];
         for (final m in userMemories) {

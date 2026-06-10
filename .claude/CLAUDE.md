@@ -262,7 +262,7 @@ RagTelemetry (immutable, computed getters cho derived state):
   topScores: List<double> (tối đa kTelemetryTopScoresCount=5)
   bestScore / bestScoreGap / worstScore (computed từ topScores)
   matchedChunks, trimmedChunks, returnedChunks
-  ragTokenCount, ragTokenBudget, totalPromptTokenCount
+  ragTokenCount, ragTokenBudget
   state (computed): empty / weak / normal (dựa trên kWeakScoreThreshold=0.75)
   toLogString() format log
 
@@ -270,7 +270,8 @@ RagTelemetryAggregator:
   record(telemetry) → ghi nhận từng query
   retrievalSuccessRate, weakRetrievalPercent, emptyRetrievalPercent
   avgRetrievalTimeMs, maxRetrievalTimeMs
-  avgBestScore, avgTrimmedChunks, avgReturnedChunks, avgMatchedChunks
+  averageBestScore, avgBestScore, averageBestScoreGap, averageLatencyMs
+  avgTrimmedChunks, avgReturnedChunks, avgMatchedChunks
   scoreDistribution: Map<ScoreBucket, int> (histogram)
   toReportString() → health report
 

@@ -58,9 +58,6 @@ class RagTelemetry {
   /// Budget dành cho RAG
   final int ragTokenBudget;
 
-  /// Tổng token của toàn bộ prompt (history + summary + rag + ...)
-  final int totalPromptTokenCount;
-
   // ─── Computed getters (không lưu field) ───────────────────────────────
 
   /// Best score (top-1), null nếu không có chunk nào
@@ -93,7 +90,6 @@ class RagTelemetry {
     required this.returnedChunks,
     required this.ragTokenCount,
     required this.ragTokenBudget,
-    required this.totalPromptTokenCount,
   });
 
   /// Format telemetry thành log string.
@@ -109,8 +105,7 @@ class RagTelemetry {
         'returned=$returnedChunks '
         'trimmed=$trimmedChunks | '
         'budget=$ragTokenBudget '
-        'ragTokens=$ragTokenCount '
-        'totalPromptTokens=$totalPromptTokenCount | '
+        'ragTokens=$ragTokenCount | '
         'state=$state';
   }
 }

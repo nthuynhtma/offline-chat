@@ -120,7 +120,6 @@ class RagServiceImpl implements RagService {
       returnedChunks: returnedChunks,
       ragTokenCount: ragTokenCount,
       ragTokenBudget: tokenBudget,
-      totalPromptTokenCount: 0, // sẽ được set sau bởi ChatBloc khi build prompt
     );
     log_util.log.i(telemetry.toLogString());
 

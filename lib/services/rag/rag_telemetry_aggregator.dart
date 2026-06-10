@@ -30,6 +30,8 @@ class RagTelemetryAggregator {
   };
 
   double _sumBestScores = 0;
+  double _sumBestScoreGaps = 0;
+  int _gapCount = 0;
   double _maxRetrievalTimeMs = 0;
 
   /// Ghi nhận một telemetry entry.
@@ -59,7 +61,7 @@ class RagTelemetryAggregator {
     _totalReturnedChunks += telemetry.returnedChunks;
     _totalMatchedChunks += telemetry.matchedChunks;
 
-    // Score distribution
+    // Best score
     final bestScore = telemetry.bestScore;
     if (bestScore != null) {
       _sumBestScores += bestScore;
@@ -76,6 +78,13 @@ class RagTelemetryAggregator {
         _scoreBuckets[ScoreBucket.above90] =
             (_scoreBuckets[ScoreBucket.above90] ?? 0) + 1;
       }
+    }
+
+    // Best score gap
+    final gap = telemetry.bestScoreGap;
+    if (gap != null) {
+      _sumBestScoreGaps += gap;
+      _gapCount++;
     }
   }
 
@@ -103,9 +112,19 @@ class RagTelemetryAggregator {
   /// Thời gian retrieval max (ms).
   double get maxRetrievalTimeMs => _maxRetrievalTimeMs;
 
+  /// Average best score (alias for readability).
+  double get averageBestScore => avgBestScore;
+
   /// Average best score.
   double get avgBestScore =>
       _totalQueries > 0 ? _sumBestScores / _totalQueries : 0;
+
+  /// Average gap between top-1 and top-2 scores.
+  double get averageBestScoreGap =>
+      _gapCount > 0 ? _sumBestScoreGaps / _gapCount : 0;
+
+  /// Thời gian retrieval trung bình (ms) — alias for readability.
+  double get averageLatencyMs => avgRetrievalTimeMs;
 
   /// Số chunk trim trung bình mỗi query.
   double get avgTrimmedChunks =>
@@ -134,6 +153,8 @@ class RagTelemetryAggregator {
     _totalReturnedChunks = 0;
     _totalMatchedChunks = 0;
     _sumBestScores = 0;
+    _sumBestScoreGaps = 0;
+    _gapCount = 0;
     _maxRetrievalTimeMs = 0;
     for (final bucket in _scoreBuckets.keys) {
       _scoreBuckets[bucket] = 0;
@@ -152,6 +173,7 @@ class RagTelemetryAggregator {
     buffer.writeln('  empty: $_emptyCount (${emptyRetrievalPercent.toStringAsFixed(1)}%)');
     buffer.writeln('');
     buffer.writeln('Avg Best Score: ${avgBestScore.toStringAsFixed(3)}');
+    buffer.writeln('Avg Best Score Gap: ${averageBestScoreGap.toStringAsFixed(3)}');
     buffer.writeln('Avg Retrieval Time: ${avgRetrievalTimeMs.toStringAsFixed(0)}ms (max: ${maxRetrievalTimeMs.toStringAsFixed(0)}ms)');
     buffer.writeln('');
     buffer.writeln('Chunks: matched=${avgMatchedChunks.toStringAsFixed(1)} returned=${avgReturnedChunks.toStringAsFixed(1)} trimmed=${avgTrimmedChunks.toStringAsFixed(1)}');
