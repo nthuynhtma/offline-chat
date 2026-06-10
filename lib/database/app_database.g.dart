@@ -1616,8 +1616,8 @@ class $SessionMemoryTable extends SessionMemory
       'session_id', aliasedName, false,
       type: DriftSqlType.string,
       requiredDuringInsert: true,
-      defaultConstraints:
-          GeneratedColumn.constraintIsAlways('REFERENCES sessions (id)'));
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES sessions (id) ON UPDATE CASCADE ON DELETE CASCADE'));
   static const VerificationMeta _summaryMeta =
       const VerificationMeta('summary');
   @override
@@ -2322,6 +2322,20 @@ abstract class _$AppDatabase extends GeneratedDatabase {
                 limitUpdateKind: UpdateKind.delete),
             result: [
               TableUpdate('vectors', kind: UpdateKind.delete),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('sessions',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('session_memory', kind: UpdateKind.delete),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('sessions',
+                limitUpdateKind: UpdateKind.update),
+            result: [
+              TableUpdate('session_memory', kind: UpdateKind.update),
             ],
           ),
         ],

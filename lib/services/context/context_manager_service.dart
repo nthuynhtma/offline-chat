@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
-import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 /// Tóm tắt lịch sử chat được cache
@@ -16,6 +15,26 @@ class _SummaryCache {
     required this.summary,
     required this.estimatedTokens,
     required this.createdAt,
+  });
+}
+
+/// Local BuiltContext for backward compatibility.
+/// Do NOT use in new code — replaced by PromptBuilder + RagService.
+class BuiltContext {
+  final String question;
+  final List<SearchResult> relevantChunks;
+  final List<MessageModel> history;
+  final bool historyWasTrimmed;
+  final int estimatedTokens;
+  final String? summary;
+
+  const BuiltContext({
+    required this.question,
+    required this.relevantChunks,
+    required this.history,
+    required this.historyWasTrimmed,
+    required this.estimatedTokens,
+    this.summary,
   });
 }
 

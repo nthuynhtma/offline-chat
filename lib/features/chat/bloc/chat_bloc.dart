@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
@@ -10,7 +9,6 @@ import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
-import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
@@ -19,6 +17,8 @@ import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/services/memory_store/memory_store_service.dart';
 import 'package:offline_chat/services/memory_store/summary_service.dart';
 import 'package:offline_chat/services/memory_store/memory_prompt_formatter.dart';
+import 'package:offline_chat/services/rag/rag_service.dart';
+import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 
 // Events
 sealed class ChatEvent extends Equatable {
@@ -125,11 +125,11 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   final MessageRepository _messageRepo;
   final SessionRepository _sessionRepo;
   final GemmaService _gemmaService;
-  final GeckoService _geckoService;
-  final VectorStoreService _vectorStore;
   final ModelBloc _modelBloc;
   final MemoryStoreService _memoryStore;
   final SummaryService _summaryService;
+  final RagService _ragService;
+  final PromptBuilder _promptBuilder;
   final Uuid _uuid = const Uuid();
 
   String? _currentSessionId;
@@ -155,20 +155,20 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     required MessageRepository messageRepo,
     required SessionRepository sessionRepo,
     required GemmaService gemmaService,
-    required GeckoService geckoService,
-    required VectorStoreService vectorStore,
     required ModelBloc modelBloc,
     required MemoryStoreService memoryStore,
     required SummaryService summaryService,
+    required RagService ragService,
+    required PromptBuilder promptBuilder,
     int? contextWindow,
   })  : _messageRepo = messageRepo,
         _sessionRepo = sessionRepo,
         _gemmaService = gemmaService,
-        _geckoService = geckoService,
-        _vectorStore = vectorStore,
         _modelBloc = modelBloc,
         _memoryStore = memoryStore,
         _summaryService = summaryService,
+        _ragService = ragService,
+        _promptBuilder = promptBuilder,
         _memoryBudget = MemoryBudgetConfig(contextWindow: contextWindow),
         super(const ChatInitial()) {
     on<SessionInitialized>(_onSessionInitialized);
@@ -326,35 +326,13 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       _currentMessages = currentMessages;
       emit(ChatThinking(currentMessages));
 
-      // 2. RAG retrieval
-      List<SearchResult> ragResults = [];
-      if (_geckoService.isReady) {
-        try {
-          final queryVector = await _geckoService.embed(event.content);
-          ragResults = await _vectorStore.search(
-            queryVector: queryVector,
-            topK: 5,
-            threshold: 0.7,
-          );
-          log_util.log.i('🔍 [RAG] Tìm thấy ${ragResults.length} chunks liên quan');
-        } catch (e) {
-          log_util.log.w('⚠️ [RAG] Lỗi khi retrieve chunks: $e — graceful degradation');
-          ragResults = [];
-        }
-      }
-
-      // 3. Build user message với RAG context nếu có
-      // ─── Tính token budget động ──────────────────────────────────────
-      // Tính token cho phần history đã được replay
-      // TODO: Current token estimation is based on replayed history only.
-      // When session cycling is implemented, use actual session
-      // context size instead of replay history size.
+      // ─── 2. RAG retrieval via RagService ─────────────────────────────
+      // Tính token budget động cho RAG
       final historyBudget = (kGemmaMaxTokens * kHistoryBudgetRatio).round();
       final reservedResponse = (kGemmaMaxTokens * kResponseBudgetRatio).round();
       final reservedSystem = (kGemmaMaxTokens * kSystemBudgetRatio).round();
       final questionTokens = estimateTokens(event.content);
 
-      // Tính token sum cho history đã replay (giống logic trong _createGemmaSessionWithHistory)
       var historyTokenSum = 0;
       for (int i = _currentMessages.length - 1; i >= 0; i--) {
         final msgToken = estimateMessageTokens(_currentMessages[i].content);
@@ -367,7 +345,6 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           reservedResponse -
           reservedSystem -
           questionTokens;
-      final safeRagBudget = max(0, ragBudget);
 
       log_util.log.i(
         '📊 Context Budget: '
@@ -375,59 +352,33 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         'response=$reservedResponse, '
         'system=$reservedSystem, '
         'question=$questionTokens, '
-        'rag=$safeRagBudget, '
-        'total=${historyTokenSum + reservedResponse + reservedSystem + questionTokens + safeRagBudget}',
+        'rag=$ragBudget, '
+        'total=${historyTokenSum + reservedResponse + reservedSystem + questionTokens + ragBudget.clamp(0, kGemmaMaxTokens)}',
       );
 
-      String userMessageForModel = event.content;
-      if (ragResults.isNotEmpty && safeRagBudget > 0) {
-        final ragPreface = StringBuffer();
-        ragPreface.writeln('[Tài liệu tham khảo từ cơ sở tri thức cá nhân (ưu tiên dùng thông tin này):]');
-        for (int i = 0; i < ragResults.length; i++) {
-          ragPreface.writeln('\n[Tài liệu ${i + 1}]');
-          ragPreface.writeln(ragResults[i].chunkText);
-        }
-        ragPreface.writeln('\n[Câu hỏi của người dùng:]');
-        ragPreface.writeln(event.content);
-        userMessageForModel = ragPreface.toString();
+      final ragContext = await _ragService.retrieve(
+        query: event.content,
+        tokenBudget: ragBudget.clamp(0, kGemmaMaxTokens),
+      );
 
-        // Ước lượng token của toàn bộ prompt (bao gồm RAG + question)
-        final estimatedTokens = estimateTokens(userMessageForModel);
-        if (estimatedTokens > safeRagBudget) {
-          log_util.log.w('⚠️ [RAG] Prompt quá dài (~${estimatedTokens}tok, budget=${safeRagBudget}tok), cắt giảm RAG');
-          final ragTokenBudget = safeRagBudget - estimateTokens('[Tài liệu tham khảo:]\n[Câu hỏi:]\n${event.content}');
-          final safeRagTokenBudget = ragTokenBudget.clamp(10, safeRagBudget);
+      // 3. Build prompt via PromptBuilder
+      final userMemories = await _memoryStore.getAllUserMemories();
+      final userMemoryList = userMemories
+          .map((m) => UserMemory(
+              namespace: m.namespace, key: m.key, value: m.value))
+          .toList();
 
-          final shortRagPreface = StringBuffer();
-          shortRagPreface.writeln('[Tài liệu tham khảo:]');
-          var usedToken = estimateTokens('[Tài liệu tham khảo:]');
-          for (int i = 0; i < ragResults.length && usedToken < safeRagTokenBudget; i++) {
-            final chunk = ragResults[i].chunkText;
-            final chunkLabel = '\n[Tài liệu ${i + 1}]';
-            final labelToken = estimateTokens(chunkLabel);
-            final chunkToken = estimateTokens(chunk);
+      final memoryRow = await _memoryStore.getSessionMemory(_currentSessionId!);
 
-            if (usedToken + labelToken + chunkToken > safeRagTokenBudget) {
-              // Trim chunk content để vừa budget
-              final remainingToken = safeRagTokenBudget - usedToken - labelToken;
-              final maxChars = (remainingToken * kCharsPerToken).round();
-              if (maxChars > 20) {
-                shortRagPreface.writeln(chunkLabel);
-                shortRagPreface.writeln(chunk.substring(0, maxChars.clamp(0, chunk.length)));
-                usedToken += labelToken + estimateTokens(chunk.substring(0, maxChars.clamp(0, chunk.length)));
-              }
-              break;
-            } else {
-              shortRagPreface.writeln(chunkLabel);
-              shortRagPreface.writeln(chunk);
-              usedToken += labelToken + chunkToken;
-            }
-          }
-          shortRagPreface.writeln('\n[Câu hỏi:]');
-          shortRagPreface.writeln(event.content);
-          userMessageForModel = shortRagPreface.toString();
-        }
-      }
+      final prompt = await _promptBuilder.build(
+        question: event.content,
+        ragContext: ragContext,
+        history: _currentMessages,
+        sessionSummary: memoryRow?.summary,
+        userMemories: userMemoryList,
+      );
+
+      log_util.log.i('🔍 [RAG] Tìm thấy ${ragContext.chunks.length} chunks liên quan');
 
       // 4. Đảm bảo session tồn tại
       if (!_gemmaService.hasActiveSession) {
@@ -440,14 +391,14 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       log_util.log.i('🚀 [Stream] Bắt đầu generateWithSession (assistantMsgId=$assistantMsgId)');
 
       await emit.forEach<String>(
-        _gemmaService.generateWithSession(userMessageForModel),
+        _gemmaService.generateWithSession(prompt),
         onData: (token) {
           _accumulatedText += token;
           return ChatStreaming(
             messages: currentMessages,
             streamingText: _accumulatedText,
             streamingId: assistantMsgId,
-            ragResults: ragResults.isNotEmpty ? ragResults : null,
+            ragResults: ragContext.hasContext ? ragContext.chunks : null,
           );
         },
         onError: (error, _) {

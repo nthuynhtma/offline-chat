@@ -18,6 +18,8 @@ import 'package:offline_chat/services/gemma/gemma_service.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
+import 'package:offline_chat/services/rag/rag_service.dart';
+import 'package:offline_chat/services/rag/rag_service_impl.dart';
 import 'package:offline_chat/services/vectorstore/semantic_cache_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
@@ -46,9 +48,20 @@ Future<void> setupLocator() async {
   sl.registerLazySingleton<ExportSessionService>(
     () => ExportSessionServiceImpl(),
   );
-  sl.registerLazySingleton<PromptBuilderService>(
-    () => PromptBuilderServiceImpl(),
+
+  // PromptBuilder interface — registered as new abstract interface
+  sl.registerLazySingleton<PromptBuilder>(
+    () => PromptBuilderImpl(),
   );
+
+  // RAG service
+  sl.registerLazySingleton<RagService>(
+    () => RagServiceImpl(
+      geckoService: sl<GeckoService>(),
+      vectorStore: sl<VectorStoreService>(),
+    ),
+  );
+
   sl.registerLazySingleton<ChunkingService>(() => ChunkingServiceImpl());
   sl.registerLazySingleton<DocumentParserService>(
     () => DocumentParserServiceImpl(),
@@ -74,8 +87,7 @@ Future<void> setupLocator() async {
     ),
   );
 
-  // ─── Context Manager ───────────────────────────────────────────────────────
-  // @Deprecated: Replaced by MemoryStoreService + SummaryService + Session API
+  // ─── Context Manager (Deprecated) ──────────────────────────────────────────
   sl.registerLazySingleton<ContextManagerService>(
     () => ContextManagerService(
       sl<MessageRepository>(),
@@ -96,30 +108,25 @@ Future<void> setupLocator() async {
   );
 
   // ─── Blocs ─────────────────────────────────────────────────────────────────
-
-  // FIX: ModelBloc nhận thêm GemmaService & GeckoService để có thể gọi
-  // initialize() ngay khi download hoàn tất — đây là bước bị thiếu
-  // khiến isReady luôn = false dù file đã có trên disk.
   sl.registerLazySingleton<ModelBloc>(
     () => ModelBloc(
       modelManager: sl<ModelManagerService>(),
-      gemmaService: sl<GemmaService>(),    // FIX
-      geckoService: sl<GeckoService>(),    // FIX
+      gemmaService: sl<GemmaService>(),
+      geckoService: sl<GeckoService>(),
     ),
   );
 
-  // ChatBloc là singleton — tất cả ChatPage dùng chung một instance.
-  // GemmaService.isReady sẽ đúng vì cùng instance với ModelBloc đã initialize.
+  // ChatBloc with new RagService + PromptBuilder, removed geckoService/vectorStore
   sl.registerFactory<ChatBloc>(
     () => ChatBloc(
       messageRepo: sl<MessageRepository>(),
       sessionRepo: sl<SessionRepository>(),
       gemmaService: sl<GemmaService>(),
-      geckoService: sl<GeckoService>(),
-      vectorStore: sl<VectorStoreService>(),
       modelBloc: sl<ModelBloc>(),
       memoryStore: sl<MemoryStoreService>(),
       summaryService: sl<SummaryService>(),
+      ragService: sl<RagService>(),
+      promptBuilder: sl<PromptBuilder>(),
     ),
   );
 

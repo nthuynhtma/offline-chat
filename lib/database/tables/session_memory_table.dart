@@ -2,7 +2,9 @@ import 'package:drift/drift.dart';
 import 'sessions_table.dart';
 
 class SessionMemory extends Table {
-  TextColumn get sessionId => text().references(Sessions, #id)();
+  TextColumn get sessionId => text().references(Sessions, #id,
+        onDelete: KeyAction.cascade,
+        onUpdate: KeyAction.cascade)();
   TextColumn get summary => text().nullable()();
   IntColumn get summaryVersion => integer().withDefault(const Constant(0))();
   IntColumn get msgCount => integer().withDefault(const Constant(0))();

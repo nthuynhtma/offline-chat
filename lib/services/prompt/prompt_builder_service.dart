@@ -1,37 +1,54 @@
 import 'package:offline_chat/features/chat/models/message_model.dart';
-import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
+import 'package:offline_chat/services/rag/rag_context.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
-class BuiltContext {
-  final String question;
-  final List<SearchResult> relevantChunks;
-  final List<MessageModel> history;
-  final bool historyWasTrimmed;
-  final int estimatedTokens;
-  final String? summary;
-
-  const BuiltContext({
-    required this.question,
-    required this.relevantChunks,
-    required this.history,
-    required this.historyWasTrimmed,
-    required this.estimatedTokens,
-    this.summary,
+/// Interface cho PromptBuilder.
+///
+/// Chịu trách nhiệm format toàn bộ prompt từ các thành phần:
+/// - System prompt
+/// - Session summary (conversation history đã summarize)
+/// - User memories (cross-session knowledge)
+/// - RAG context (document chunks)
+/// - History (recent messages)
+/// - Question
+abstract interface class PromptBuilder {
+  /// Build prompt string hoàn chỉnh.
+  Future<String> build({
+    required String question,
+    required RagContext ragContext,
+    required List<MessageModel> history,
+    String? sessionSummary,
+    List<UserMemory> userMemories,
   });
 }
 
-abstract interface class PromptBuilderService {
-  String build(BuiltContext context);
+/// Một user memory entry đơn giản.
+class UserMemory {
+  final String namespace;
+  final String key;
+  final String value;
+
+  const UserMemory({
+    required this.namespace,
+    required this.key,
+    required this.value,
+  });
 }
 
-class PromptBuilderServiceImpl implements PromptBuilderService {
+final class PromptBuilderImpl implements PromptBuilder {
   @override
-  String build(BuiltContext context) {
+  Future<String> build({
+    required String question,
+    required RagContext ragContext,
+    required List<MessageModel> history,
+    String? sessionSummary,
+    List<UserMemory>? userMemories,
+  }) async {
     log_util.log.d('🔨 [PromptBuilder] Bắt đầu build prompt...');
 
     final buffer = StringBuffer();
 
-    // System turn
+    // ─── System turn ─────────────────────────────────────────────────
     buffer.writeln('<start_of_turn>system');
     buffer.writeln('''
     You are AgriAI, an agricultural assistant running completely offline on a mobile device.
@@ -58,52 +75,61 @@ class PromptBuilderServiceImpl implements PromptBuilderService {
     - Remember that you operate completely offline on the user's mobile device.
     ''');
 
-    if (context.relevantChunks.isNotEmpty) {
+    // ─── RAG Context ────────────────────────────────────────────────
+    if (ragContext.hasContext) {
       buffer.writeln('\nDocument Context (Highest Priority):');
       buffer.writeln('The following information comes from the user\'s agricultural documents.');
       buffer.writeln('Use this information as the primary source when answering.');
       buffer.writeln('If the answer can be found in the document context, do not ignore it.');
       buffer.writeln('If the document context is insufficient, then use your general agricultural knowledge.');
 
-      log_util.log.d('🔨 [PromptBuilder] Thêm ${context.relevantChunks.length} chunks vào prompt');
+      log_util.log.d('🔨 [PromptBuilder] Thêm ${ragContext.chunks.length} chunks vào prompt');
 
-      for (int i = 0; i < context.relevantChunks.length; i++) {
+      for (int i = 0; i < ragContext.chunks.length; i++) {
         buffer.writeln('\n[Document ${i + 1}]');
-        buffer.writeln(context.relevantChunks[i].chunkText);
+        buffer.writeln(ragContext.chunks[i].chunkText);
       }
     } else {
       log_util.log.d('🔨 [PromptBuilder] Không có relevant chunks — bỏ qua RAG context');
     }
 
-    if (context.summary != null && context.summary!.isNotEmpty) {
+    // ─── Session Summary ────────────────────────────────────────────
+    if (sessionSummary != null && sessionSummary.isNotEmpty) {
       buffer.writeln('\nConversation summary (condensed history):');
-      buffer.writeln(context.summary);
-      log_util.log.d('🔨 [PromptBuilder] Đã thêm conversation summary (${context.summary!.length} chars)');
-    } else {
-      log_util.log.d('🔨 [PromptBuilder] Không có summary');
+      buffer.writeln(sessionSummary);
+      log_util.log.d('🔨 [PromptBuilder] Đã thêm conversation summary (${sessionSummary.length} chars)');
+    }
+
+    // ─── User Memories ──────────────────────────────────────────────
+    if (userMemories != null && userMemories.isNotEmpty) {
+      buffer.writeln('\nUser Information (learned from past conversations):');
+      for (final mem in userMemories) {
+        buffer.writeln('- ${mem.namespace}:${mem.key} → ${mem.value}');
+      }
+      log_util.log.d('🔨 [PromptBuilder] Đã thêm ${userMemories.length} user memories');
     }
 
     buffer.writeln('<end_of_turn>');
 
-    // History turns
-    // Bỏ qua message cuối cùng trong history nếu nó trùng với context.question
+    // ─── History turns ──────────────────────────────────────────────
+    // Bỏ qua message cuối cùng trong history nếu nó trùng với question
     // (vì message này sẽ được thêm riêng ở bước "Current question" bên dưới)
-    final historyToInclude = (context.history.isNotEmpty &&
-            context.history.last.role.name == 'user' &&
-            context.history.last.content == context.question)
-        ? context.history.sublist(0, context.history.length - 1)
-        : context.history;
+    final historyToInclude = (history.isNotEmpty &&
+            history.last.role.name == 'user' &&
+            history.last.content == question)
+        ? history.sublist(0, history.length - 1)
+        : history;
 
-    log_util.log.d('🔨 [PromptBuilder] Thêm ${historyToInclude.length} history turns vào prompt (bỏ qua ${context.history.length - historyToInclude.length} message cuối trùng với question)');
+    log_util.log.d('🔨 [PromptBuilder] Thêm ${historyToInclude.length} history turns (bỏ qua ${history.length - historyToInclude.length} message cuối trùng với question)');
     for (final msg in historyToInclude) {
       buffer.writeln('<start_of_turn>${msg.role.name}');
       buffer.writeln(msg.content);
       buffer.writeln('<end_of_turn>');
     }
 
-    // Current question
+    // ─── Current question ───────────────────────────────────────────
     buffer.writeln('<start_of_turn>user');
-    buffer.writeln(context.question);
+    buffer.writeln(question);
     buffer.writeln('<end_of_turn>');
     buffer.write('<start_of_turn>model\n');
 

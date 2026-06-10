@@ -66,20 +66,14 @@ User gõ text → nhấn Send
        │    └→ Chưa download → emit(ChatError(needsModelDownload: true))
        │
        ├→ [1] Save user message → SQLite → emit(ChatThinking)
-       ├→ [2] RAG Retrieval (nếu Gecko ready)
-       │    └→ _geckoService.embed(content) → queryVector[768]
-       │    └→ _vectorStore.search(queryVector, topK:5, threshold:0.7)
-       ├→ [3] Tính token budget & Build user message với RAG context
-       │    ├→ History tokens = estimateMessageTokens() trên phần history được replay
-       │    ├→ Response reserve = 25% kGemmaMaxTokens
-       │    ├→ System reserve = 10% kGemmaMaxTokens
-       │    ├→ Question tokens = estimateTokens(userMessage)
-       │    ├→ RAG budget = max(0, kGemmaMaxTokens - history - response - system - question)
-       │    └→ Inject RAG chunks vào user message, trim nếu vượt budget (dùng estimateTokens)
+       ├→ [2] RAG Retrieval → RagService.retrieve(query, tokenBudget)
+       │    └→ RagServiceImpl: embed (GeckoService) → vector search (topK:20, threshold:0.7) → chunk-level trim → RagContext
+       ├→ [3] Build prompt → PromptBuilder.build(question, ragContext, history, sessionSummary, userMemories)
+       │    └→ PromptBuilderImpl: system prompt + RAG chunks + summary + user memories + history + question
        ├→ [4] Đảm bảo session tồn tại (nếu lỗi → tạo lại)
        ├→ [5] Stream response qua Session API
-       │    └→ emit.forEach<String>(_gemmaService.generateWithSession(userMessageForModel))
-       │    │    ├→ GemmaServiceImpl: addQueryChunk(userMessage) → getResponseAsync() (timeout 120s)
+       │    └→ emit.forEach<String>(_gemmaService.generateWithSession(prompt))
+       │    │    ├→ GemmaServiceImpl: addQueryChunk(prompt) → getResponseAsync() (timeout 120s)
        │    │    ├→ Mỗi token → emit(ChatStreaming)
        │    │    └→ UI: _LastBubble cập nhật từng token
        ├→ [6] Stream complete
@@ -277,9 +271,11 @@ GetIt — quản lý dependency graph (singleton services, repositories)
 MultiBlocProvider ở app.dart — lifecycle của singleton blocs
 ChatBloc — Factory pattern, mỗi session tạo mới, BlocProvider ở ChatPage với key
 
-ChatBloc constructor (đã cleanup):
-  messageRepo, sessionRepo, gemmaService, geckoService, vectorStore, modelBloc
-  (KHÔNG còn: contextManager, promptBuilder)
+ChatBloc constructor:
+  messageRepo, sessionRepo, gemmaService, modelBloc,
+  memoryStore, summaryService, ragService, promptBuilder, contextWindow
+  (KHÔNG còn: geckoService, vectorStore, contextManager, promptBuilder cũ)
+  (MỚI: ragService, promptBuilder)
 ```
 
 ---
@@ -306,8 +302,11 @@ lib/
 │   ├── gemma/                     ← gemma_service.dart (session-based + legacy)
 │   ├── gecko/
 │   ├── vectorstore/
-│   ├── context/                   ← context_manager_service.dart (async summarize, chưa dùng)
-│   ├── prompt/                    ← prompt_builder_service.dart (không dùng trong ChatBloc)
+│   ├── rag/                       ← rag_service, rag_context, rag_service_impl (RAG pipeline interface)
+│   ├── memory_store/              ← memory_store_service, summary_service, memory_prompt_formatter
+│   ├── context/                   ← context_manager_service.dart (@Deprecated)
+│   ├── prompt/                    ← prompt_builder_service.dart (interface PromptBuilder + PromptBuilderImpl)
+│   │                                (hiện đã dùng lại trong ChatBloc thay vì inline logic)
 │   └── parser/
 ├── database/
 │   ├── app_database.dart
@@ -339,6 +338,9 @@ lib/
 | Không scroll khi streaming | Thêm `addPostFrameCallback` trong `build()` + bỏ block `ChatStreaming→ChatStreaming` trong `buildWhen` |
 | Không scroll về cuối khi vào chat | Thêm `_scrollToBottom()` trong `initState()` với `addPostFrameCallback` |
 | RenderBox not laid out với Markdown | Dùng `MarkdownBody` (không dùng `Markdown` widget có ListView lồng) |
+| **Không chat được hàng trăm lượt do context 2048 token giới hạn** | **Auto Summary + Persistent User Memory**: incremental summary (old + new messages) → lưu DB, inject summary + user memory vào system instruction khi mở session, trigger dựa trên runningTokenCount > 65% availableConversationBudget, UserMemory cross-session (namespace.key=value) |
+| **Xoá session để lại orphan SessionMemory data** | Thêm `onDelete: KeyAction.cascade` + `onUpdate: KeyAction.cascade` vào foreign key trong `session_memory_table.dart` |
+| **RAG logic inline trong ChatBloc + chunk substring trimming** | Tách **RagService** (interface + impl) + **PromptBuilder** (interface + impl) + **RagContext** model. ChatBloc chỉ còn orchestration. Chunk trimming: `removeLast()` thay vì `substring()`. |
 
 ---
 
