@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
@@ -9,12 +10,12 @@ import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
-import 'package:offline_chat/services/context/context_manager_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
-import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
+import 'package:offline_chat/core/utils/token_estimator.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
 
 // Events
 sealed class ChatEvent extends Equatable {
@@ -285,8 +286,43 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       }
 
       // 3. Build user message với RAG context nếu có
+      // ─── Tính token budget động ──────────────────────────────────────
+      // Tính token cho phần history đã được replay
+      // TODO: Current token estimation is based on replayed history only.
+      // When session cycling is implemented, use actual session
+      // context size instead of replay history size.
+      final historyBudget = (kGemmaMaxTokens * kHistoryBudgetRatio).round();
+      final reservedResponse = (kGemmaMaxTokens * kResponseBudgetRatio).round();
+      final reservedSystem = (kGemmaMaxTokens * kSystemBudgetRatio).round();
+      final questionTokens = estimateTokens(event.content);
+
+      // Tính token sum cho history đã replay (giống logic trong _createGemmaSessionWithHistory)
+      var historyTokenSum = 0;
+      for (int i = _currentMessages.length - 1; i >= 0; i--) {
+        final msgToken = estimateMessageTokens(_currentMessages[i].content);
+        if (historyTokenSum + msgToken > historyBudget) break;
+        historyTokenSum += msgToken;
+      }
+
+      final ragBudget = kGemmaMaxTokens -
+          historyTokenSum -
+          reservedResponse -
+          reservedSystem -
+          questionTokens;
+      final safeRagBudget = max(0, ragBudget);
+
+      log_util.log.i(
+        '📊 Context Budget: '
+        'history=$historyTokenSum, '
+        'response=$reservedResponse, '
+        'system=$reservedSystem, '
+        'question=$questionTokens, '
+        'rag=$safeRagBudget, '
+        'total=${historyTokenSum + reservedResponse + reservedSystem + questionTokens + safeRagBudget}',
+      );
+
       String userMessageForModel = event.content;
-      if (ragResults.isNotEmpty) {
+      if (ragResults.isNotEmpty && safeRagBudget > 0) {
         final ragPreface = StringBuffer();
         ragPreface.writeln('[Tài liệu tham khảo từ cơ sở tri thức cá nhân (ưu tiên dùng thông tin này):]');
         for (int i = 0; i < ragResults.length; i++) {
@@ -297,20 +333,37 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         ragPreface.writeln(event.content);
         userMessageForModel = ragPreface.toString();
 
-        // Kiểm tra nếu quá dài thì trim RAG chunks
-        final estimatedTokens = (userMessageForModel.length / 3).ceil();
-        if (estimatedTokens > 800) {
-          log_util.log.w('⚠️ [RAG] User message + RAG quá dài (~$estimatedTokens tokens), cắt giảm RAG');
+        // Ước lượng token của toàn bộ prompt (bao gồm RAG + question)
+        final estimatedTokens = estimateTokens(userMessageForModel);
+        if (estimatedTokens > safeRagBudget) {
+          log_util.log.w('⚠️ [RAG] Prompt quá dài (~${estimatedTokens}tok, budget=${safeRagBudget}tok), cắt giảm RAG');
+          final ragTokenBudget = safeRagBudget - estimateTokens('[Tài liệu tham khảo:]\n[Câu hỏi:]\n${event.content}');
+          final safeRagTokenBudget = ragTokenBudget.clamp(10, safeRagBudget);
+
           final shortRagPreface = StringBuffer();
           shortRagPreface.writeln('[Tài liệu tham khảo:]');
-          var usedChars = shortRagPreface.length;
-          for (int i = 0; i < ragResults.length && usedChars < 2400; i++) {
+          var usedToken = estimateTokens('[Tài liệu tham khảo:]');
+          for (int i = 0; i < ragResults.length && usedToken < safeRagTokenBudget; i++) {
             final chunk = ragResults[i].chunkText;
-            final maxChunkLen = 800 - usedChars - event.content.length;
-            final trimmedChunk = maxChunkLen > 100 ? chunk.substring(0, maxChunkLen) : chunk.substring(0, 100);
-            shortRagPreface.writeln('\n[Tài liệu ${i + 1}]');
-            shortRagPreface.writeln(trimmedChunk);
-            usedChars += chunk.length + 20;
+            final chunkLabel = '\n[Tài liệu ${i + 1}]';
+            final labelToken = estimateTokens(chunkLabel);
+            final chunkToken = estimateTokens(chunk);
+
+            if (usedToken + labelToken + chunkToken > safeRagTokenBudget) {
+              // Trim chunk content để vừa budget
+              final remainingToken = safeRagTokenBudget - usedToken - labelToken;
+              final maxChars = (remainingToken * kCharsPerToken).round();
+              if (maxChars > 20) {
+                shortRagPreface.writeln(chunkLabel);
+                shortRagPreface.writeln(chunk.substring(0, maxChars.clamp(0, chunk.length)));
+                usedToken += labelToken + estimateTokens(chunk.substring(0, maxChars.clamp(0, chunk.length)));
+              }
+              break;
+            } else {
+              shortRagPreface.writeln(chunkLabel);
+              shortRagPreface.writeln(chunk);
+              usedToken += labelToken + chunkToken;
+            }
           }
           shortRagPreface.writeln('\n[Câu hỏi:]');
           shortRagPreface.writeln(event.content);
@@ -489,14 +542,26 @@ Instructions:
     );
     log_util.log.i('🆕 [Session] Gemma session created');
 
-    // Replay lịch sử chat vào session
-    for (final msg in messages) {
+    // Replay lịch sử chat vào session dựa trên token budget
+    // Duyệt từ message mới nhất → cũ nhất, dừng khi đạt historyBudget (35% context)
+    final historyBudget = (kGemmaMaxTokens * kHistoryBudgetRatio).round();
+    final historyMessages = <MessageModel>[];
+    var historyTokenSum = 0;
+
+    for (int i = messages.length - 1; i >= 0; i--) {
+      final msgToken = estimateMessageTokens(messages[i].content);
+      if (historyTokenSum + msgToken > historyBudget) break;
+      historyTokenSum += msgToken;
+      historyMessages.insert(0, messages[i]);
+    }
+
+    for (final msg in historyMessages) {
       await _gemmaService.addHistoryMessage(
         msg.role.name,
         msg.content,
       );
     }
-    log_util.log.i('🔄 [Session] Replayed ${messages.length} messages into Gemma session');
+    log_util.log.i('🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
   }
 
   @override

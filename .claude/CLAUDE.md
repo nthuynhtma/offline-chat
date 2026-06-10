@@ -55,6 +55,7 @@ User mở ChatPage(sessionId)
             ├→ _createGemmaSessionWithHistory(messages)
             │    ├→ GemmaService.createSession(systemInstruction: "You are AgriAI...")
             │    └→ Replay từng message qua addHistoryMessage(role, content)
+            │    └→ Chỉ replay messages vừa token budget (35% context, từ mới→cũ)
             └→ emit(ChatLoaded(messages))
 
 User gõ text → nhấn Send
@@ -68,10 +69,13 @@ User gõ text → nhấn Send
        ├→ [2] RAG Retrieval (nếu Gecko ready)
        │    └→ _geckoService.embed(content) → queryVector[768]
        │    └→ _vectorStore.search(queryVector, topK:5, threshold:0.7)
-       ├→ [3] Build user message với RAG context
-       │    └→ Inject RAG chunks vào user message:
-       │         "[Tài liệu tham khảo...] [Tài liệu 1]... [Câu hỏi của người dùng:]..."
-       │    └→ Nếu >800 tokens → tự động trim RAG chunks
+       ├→ [3] Tính token budget & Build user message với RAG context
+       │    ├→ History tokens = estimateMessageTokens() trên phần history được replay
+       │    ├→ Response reserve = 25% kGemmaMaxTokens
+       │    ├→ System reserve = 10% kGemmaMaxTokens
+       │    ├→ Question tokens = estimateTokens(userMessage)
+       │    ├→ RAG budget = max(0, kGemmaMaxTokens - history - response - system - question)
+       │    └→ Inject RAG chunks vào user message, trim nếu vượt budget (dùng estimateTokens)
        ├→ [4] Đảm bảo session tồn tại (nếu lỗi → tạo lại)
        ├→ [5] Stream response qua Session API
        │    └→ emit.forEach<String>(_gemmaService.generateWithSession(userMessageForModel))
@@ -139,6 +143,11 @@ Timeout: 120s
 Exceptions: ModelNotLoadedException, ModelTimeoutException
 
 Legacy generateStream(prompt) / generate(prompt) vẫn tồn tại nhưng không dùng trong ChatBloc.
+
+Token estimator (lib/core/utils/token_estimator.dart):
+  - estimateTokens(text): cho RAG chunks, question, summary (heuristic chars/2.5)
+  - estimateMessageTokens(text): cho history replay (estimateTokens + 5 role overhead)
+  - Dùng kCharsPerToken = 2.5 cho tiếng Việt (conservative)
 ```
 
 ### GeckoService (flutter_gemma EmbeddingModel)
@@ -159,9 +168,16 @@ Flow: registerModel(modelPath, tokenizerPath) → initialize() → embed(text) /
 ### ContextManagerService (Token Budget) — KHÔNG dùng trong ChatBloc
 ```
 Giữ lại cho session cycling trong tương lai.
-Budget hiện tại (chưa cập nhật, chỉ tham khảo):
-  totalBudget = 8000 tokens (sai với runtime 2048)
-  ragBudget = 4000, historyBudget = 3000, questionBudget = 1000, summaryBudget = 500
+Budget hiện tại đã chuyển sang ratio-based dynamic (trong chat_bloc.dart):
+  kGemmaMaxTokens = 2048
+  historyBudgetRatio = 0.35 (≈717 tok)
+  responseBudgetRatio = 0.25 (≈512 tok)
+  systemBudgetRatio = 0.10 (≈205 tok)
+  questionTokens = estimateTokens(userMessage)
+  ragBudget = max(0, phần còn lại)
+
+Các constants cũ (totalBudget=8000, ragBudget=4000, historyBudget=3000)
+đã bị xoá khỏi app_constants.dart do không còn phản ánh runtime thực tế.
 ```
 
 ### PromptBuilderService — KHÔNG dùng trong ChatBloc
@@ -217,12 +233,13 @@ ChatBloc constructor (đã cleanup):
 lib/
 ├── core/
 │   ├── constants/
-│   │   └── model_constants.dart   ← kGemmaMaxTokens = 2048
+│   │   └── model_constants.dart   ← kGemmaMaxTokens = 2048, ratio constants
 │   ├── errors/                    ← app_exception.dart (ModelTimeoutException)
 │   └── utils/
+│       └── token_estimator.dart   ← estimateTokens(), estimateMessageTokens()
 ├── features/
 │   ├── chat/
-│   │   ├── bloc/                  ← chat_bloc.dart (session-based)
+│   │   ├── bloc/                  ← chat_bloc.dart (session-based, token budget dynamic)
 │   │   ├── models/
 │   │   ├── repositories/
 │   │   └── views/                 ← chat_page.dart, message_bubble.dart, rag_sources_widget.dart
@@ -258,6 +275,7 @@ lib/
 | Summarize block inference → TTFT bị trễ | Chạy background với `unawaited()`, dùng cache cho request sau |
 | **maxTokens=1024 → lỗi tràn token (1073 >= 1024)** | Tăng `kGemmaMaxTokens = 2048` trong `model_constants.dart` |
 | **Prompt quá dài do build toàn bộ history mỗi lần** | Chuyển sang **Session-based API**: `createSession` + `generateWithSession` |
+| **History replay không giới hạn + RAG hardcode 800 token** | Token-budget based history replay (35% context, duyệt từ mới→cũ) + Dynamic RAG budget (`max(0, context - history - reserves - question)`) + ratio-based constants scale theo `kGemmaMaxTokens` |
 | Duplicate user message trong prompt | Skip last history message nếu trùng với question (trong prompt-based, đã deprecated) |
 | Không có thinking indicator khi AI xử lý | Thêm `ChatThinking` state + `_ThinkingBubble` (3 dots animation) |
 | `scrollable_positioned_list` không maintained | Migrate sang `scrollview_observer: ^1.27.0` |
@@ -265,6 +283,33 @@ lib/
 | Không scroll khi streaming | Thêm `addPostFrameCallback` trong `build()` + bỏ block `ChatStreaming→ChatStreaming` trong `buildWhen` |
 | Không scroll về cuối khi vào chat | Thêm `_scrollToBottom()` trong `initState()` với `addPostFrameCallback` |
 | RenderBox not laid out với Markdown | Dùng `MarkdownBody` (không dùng `Markdown` widget có ListView lồng) |
+
+---
+
+## Token Budget Architecture
+
+```
+kGemmaMaxTokens = 2048 (model_constants.dart)
+        |
+        ├── History Budget (35%) = ~717 tok
+        │     Duyệt từ message mới→cũ, dùng estimateMessageTokens()
+        │     Dừng khi historyTokenSum > historyBudget
+        │
+        ├── Response Reserve (25%) = ~512 tok
+        │
+        ├── System Reserve (10%) = ~205 tok
+        │
+        ├── Question Tokens = estimateTokens(userMessage)
+        │
+        └── RAG Budget = max(0, phần còn lại)
+              Trim chunks bằng estimateTokens() thay vì hardcode 800
+```
+
+### Key files:
+- `lib/core/constants/model_constants.dart` — `kGemmaMaxTokens`, ratio constants
+- `lib/core/utils/token_estimator.dart` — `estimateTokens()`, `estimateMessageTokens()`
+- `lib/features/chat/bloc/chat_bloc.dart` — History replay + Dynamic RAG budget
+- `lib/core/constants/app_constants.dart` — Đã xoá context budget constants cũ (sai với runtime 2048)
 
 ---
 
