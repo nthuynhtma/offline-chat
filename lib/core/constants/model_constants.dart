@@ -50,6 +50,14 @@ const int kSummaryBudgetMax = 500;
 /// Duration timeout cho summarize generation
 const int kSummaryTimeoutSeconds = 30;
 
+/// === Retrieval Telemetry constants ===
+
+/// Số lượng top scores tối đa trong telemetry (tránh log quá nhiều nếu topK lớn)
+const int kTelemetryTopScoresCount = 5;
+
+/// Ngưỡng score để phân loại weak retrieval (model-agnostic, có thể tune sau)
+const double kWeakScoreThreshold = 0.75;
+
 /// === Memory budget config (dynamic theo context window) ===
 
 class MemoryBudgetConfig {

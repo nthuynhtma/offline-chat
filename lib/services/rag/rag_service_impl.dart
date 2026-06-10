@@ -1,8 +1,10 @@
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/core/utils/token_estimator.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/rag/rag_context.dart';
 import 'package:offline_chat/services/rag/rag_service.dart';
+import 'package:offline_chat/services/rag/rag_telemetry.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
 /// Implementation của [RagService] sử dụng Gecko embedding + SQLite vector search.
@@ -11,7 +13,8 @@ import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 /// 1. Embed query → GeckoService
 /// 2. Vector search → VectorStoreService (topK: 20, threshold: 0.7)
 /// 3. Chunk-level trim → removeLast() cho đến khi vừa tokenBudget
-/// 4. Return RagContext
+/// 4. Log telemetry
+/// 5. Return RagContext
 class RagServiceImpl implements RagService {
   final GeckoService _geckoService;
   final VectorStoreService _vectorStore;
@@ -33,6 +36,8 @@ class RagServiceImpl implements RagService {
     required String query,
     required int tokenBudget,
   }) async {
+    final stopwatch = Stopwatch()..start();
+
     if (tokenBudget <= 0) {
       log_util.log.w('⚠️ [RagService] tokenBudget <= 0 ($tokenBudget) — skip retrieval');
       return RagContext(chunks: [], tokenCount: 0);
@@ -51,6 +56,7 @@ class RagServiceImpl implements RagService {
       log_util.log.w('⚠️ [RagService] Lỗi embed query: $e — graceful degradation');
       return RagContext(chunks: [], tokenCount: 0);
     }
+    final embedTime = stopwatch.elapsedMilliseconds;
 
     // 2. Vector search
     List<SearchResult> results;
@@ -64,43 +70,63 @@ class RagServiceImpl implements RagService {
       log_util.log.w('⚠️ [RagService] Lỗi vector search: $e — graceful degradation');
       return RagContext(chunks: [], tokenCount: 0);
     }
+    final searchTime = stopwatch.elapsedMilliseconds - embedTime;
+    final totalTime = stopwatch.elapsedMilliseconds;
+
+    // Collect top scores (giới hạn theo kTelemetryTopScoresCount)
+    final topScores = results
+        .take(kTelemetryTopScoresCount)
+        .map((r) => r.score)
+        .toList();
+
+    final matchedChunks = results.length;
 
     if (results.isEmpty) {
       log_util.log.i('🔍 [RagService] Không tìm thấy chunks liên quan (threshold=$_threshold)');
       return RagContext(chunks: [], tokenCount: 0);
     }
 
-    log_util.log.i('🔍 [RagService] Tìm thấy ${results.length} chunks (topK=$_topK, threshold=$_threshold)');
-
     // 3. Chunk-level trimming (drop last chunks cho đến khi vừa budget)
-    // Mỗi chunk cần tính token của cả chunk text + label overhead (e.g. "[Tài liệu 1]\n")
+    // Mỗi chunk cần tính token của cả chunk text + label overhead (e.g. "[Document 1]\n")
     var tokenSum = 0;
-    final labelTokenOverhead = estimateTokens('\n[Tài liệu N]\n');
+    final labelTokenOverhead = estimateTokens('\n[Document N]\n');
     final trimmed = <SearchResult>[];
 
     for (final chunk in results) {
       final chunkToken = estimateTokens(chunk.chunkText) + labelTokenOverhead;
       if (tokenSum + chunkToken > tokenBudget) {
-        log_util.log.d('🔍 [RagService] Trim: drop chunk cuối (tokenSum=$tokenSum, chunkToken=$chunkToken, budget=$tokenBudget)');
         break;
       }
       tokenSum += chunkToken;
       trimmed.add(chunk);
     }
 
+    final returnedChunks = trimmed.length;
+    final trimmedChunks = matchedChunks - returnedChunks;
+    final ragTokenCount = tokenSum;
+
     // Tính bestScore từ chunk đầu tiên (đã sort score desc)
     final bestScore = trimmed.isNotEmpty ? trimmed.first.score : null;
 
-    log_util.log.i(
-      '🔍 [RagService] Retrieval done: '
-      '${trimmed.length}/${results.length} chunks, '
-      '~${tokenSum} tokens, '
-      'bestScore=${bestScore?.toStringAsFixed(4) ?? "N/A"}',
+    // 4. Log telemetry
+    final telemetry = RagTelemetry(
+      query: query,
+      embeddingTimeMs: embedTime,
+      searchTimeMs: searchTime,
+      retrievalTimeMs: totalTime,
+      topScores: topScores,
+      matchedChunks: matchedChunks,
+      trimmedChunks: trimmedChunks,
+      returnedChunks: returnedChunks,
+      ragTokenCount: ragTokenCount,
+      ragTokenBudget: tokenBudget,
+      totalPromptTokenCount: 0, // sẽ được set sau bởi ChatBloc khi build prompt
     );
+    log_util.log.i(telemetry.toLogString());
 
     return RagContext(
       chunks: trimmed,
-      tokenCount: tokenSum,
+      tokenCount: ragTokenCount,
       bestScore: bestScore,
     );
   }

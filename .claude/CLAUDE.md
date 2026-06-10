@@ -230,10 +230,83 @@ Key files:
 ContextManagerService: @Deprecated — giữ lại để tránh break build, sẽ cleanup sau.
 ```
 
-### PromptBuilderService — KHÔNG dùng trong ChatBloc
+### RagService — RAG Pipeline Interface
 ```
-Đã bị loại bỏ khỏi ChatBloc khi migrate sang session-based API.
-Giữ lại code để tham khảo hoặc dùng cho mục đích khác.
+abstract interface class RagService {
+  Future<RagContext> retrieve({
+    required String query,
+    required int tokenBudget,
+  });
+}
+
+RagContext:
+  - chunks: List<SearchResult> (đã trim chunk-level, removeLast())
+  - tokenCount: int (tổng token của chunks)
+  - bestScore: double? (top-1 score, null nếu không có chunks)
+  - hasContext: bool (getter: chunks.isNotEmpty)
+
+RagServiceImpl:
+  1. Embed query → GeckoService
+  2. Vector search → VectorStoreService (topK: 20, threshold: 0.7)
+  3. Chunk-level trim → break khi vượt tokenBudget
+  4. Log RagTelemetry
+  5. Return RagContext
+
+Graceful degradation: nếu Gecko chưa ready hoặc search lỗi → RagContext rỗng
+```
+
+### RagTelemetry + RagTelemetryAggregator — Retrieval Observability
+```
+RagTelemetry (immutable, computed getters cho derived state):
+  query, embeddingTimeMs, searchTimeMs, retrievalTimeMs
+  topScores: List<double> (tối đa kTelemetryTopScoresCount=5)
+  bestScore / bestScoreGap / worstScore (computed từ topScores)
+  matchedChunks, trimmedChunks, returnedChunks
+  ragTokenCount, ragTokenBudget, totalPromptTokenCount
+  state (computed): empty / weak / normal (dựa trên kWeakScoreThreshold=0.75)
+  toLogString() format log
+
+RagTelemetryAggregator:
+  record(telemetry) → ghi nhận từng query
+  retrievalSuccessRate, weakRetrievalPercent, emptyRetrievalPercent
+  avgRetrievalTimeMs, maxRetrievalTimeMs
+  avgBestScore, avgTrimmedChunks, avgReturnedChunks, avgMatchedChunks
+  scoreDistribution: Map<ScoreBucket, int> (histogram)
+  toReportString() → health report
+
+Key files:
+  - lib/services/rag/rag_telemetry.dart
+  - lib/services/rag/rag_telemetry_aggregator.dart
+  - lib/core/constants/model_constants.dart → kTelemetryTopScoresCount, kWeakScoreThreshold
+```
+
+### PromptBuilder — Prompt Pipeline
+```
+abstract interface class PromptBuilder {
+  Future<String> build({
+    required String question,
+    required RagContext ragContext,
+    required List<MessageModel> history,
+    String? sessionSummary,
+    List<UserMemory> userMemories,
+  });
+}
+
+PromptBuilderImpl ordering (ưu tiên RAG sát question):
+  <start_of_turn>system
+    System Prompt (AgriAI)
+    === User Memory ===        (cross-session persona)
+    === Session Summary ===     (conversation state)
+  <end_of_turn>
+    === Recent Conversation === (history turns)
+    === Reference Documents === (RAG chunks — sát question nhất)
+    === Current Question ===
+  <start_of_turn>user
+    question
+  <start_of_turn>model
+
+Lưu ý: Delimiter (=== ... ===) giúp Gemma ổn định hơn.
+RAG nằm giữa History và Question để model nhỏ không bị loãng context.
 ```
 
 ---
@@ -341,6 +414,8 @@ lib/
 | **Không chat được hàng trăm lượt do context 2048 token giới hạn** | **Auto Summary + Persistent User Memory**: incremental summary (old + new messages) → lưu DB, inject summary + user memory vào system instruction khi mở session, trigger dựa trên runningTokenCount > 65% availableConversationBudget, UserMemory cross-session (namespace.key=value) |
 | **Xoá session để lại orphan SessionMemory data** | Thêm `onDelete: KeyAction.cascade` + `onUpdate: KeyAction.cascade` vào foreign key trong `session_memory_table.dart` |
 | **RAG logic inline trong ChatBloc + chunk substring trimming** | Tách **RagService** (interface + impl) + **PromptBuilder** (interface + impl) + **RagContext** model. ChatBloc chỉ còn orchestration. Chunk trimming: `removeLast()` thay vì `substring()`. |
+| **PromptBuilder ordering sai (RAG trước History) + thiếu delimiter** | Sửa thành: System → Memories → Summary → `<end_of_turn>` → History → RAG (sát question) → Question. Thêm delimiter `=== ... ===` cho mỗi section. |
+| **Thiếu observability cho RAG pipeline — không biết retrieval quality** | Thêm **RagTelemetry** (timing, scores, chunks, budget, state) + **RagTelemetryAggregator** (health report, score histogram). Log mỗi query. |
 
 ---
 
