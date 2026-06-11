@@ -30,3 +30,7 @@ class EmbeddingException extends AppException {
 class StorageException extends AppException {
   const StorageException(String msg) : super(msg);
 }
+
+class UploadQueueException extends AppException {
+  const UploadQueueException(String msg) : super(msg);
+}

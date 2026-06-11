@@ -157,6 +157,7 @@ Future<void> setupLocator() async {
   sl.registerLazySingleton<SessionFilesCubit>(
     () => SessionFilesCubit(
       documentsDao: db.documentsDao,
+      refsDao: db.sessionDocumentRefsDao,
       uploadQueue: sl<DocumentUploadQueue>(),
     ),
   );

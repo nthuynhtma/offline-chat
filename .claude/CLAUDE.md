@@ -3,7 +3,7 @@
 ## Mô tả dự án
 Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4-E2B (flutter_gemma ^0.16.4)** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
 
-**Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai — chat hàng trăm lượt, đóng app mở lại, tiếp tục hội thoại không cần giữ toàn bộ history trong context 2048 tokens.
+**Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai — chat hàng trăm lượt, đóng app mở lại, tiếp tục hội thoại không cần giữ toàn bộ history trong context 2048 tokens. Attached Files + Knowledge Scope + RAG completed-only filter đã triển khai — hiển thị file chips trên input bar, detach/remove file, indexing warning.
 
 ---
 
@@ -67,7 +67,7 @@ User gõ text → nhấn Send
        │
        ├→ [1] Save user message → SQLite → emit(ChatThinking)
        ├→ [2] RAG Retrieval → RagService.retrieve(query, tokenBudget)
-       │    └→ RagServiceImpl: embed (GeckoService) → vector search (topK:20, threshold:0.7) → chunk-level trim → RagContext
+       │    └→ RagServiceImpl: embed (GeckoService) → vector search (topK:20, threshold:0.7, allowedDocIds chỉ completed) → chunk-level trim → RagContext
        ├→ [3] Build prompt → PromptBuilder.build(question, ragContext, history, sessionSummary, userMemories)
        │    └→ PromptBuilderImpl: system prompt + RAG chunks + summary + user memories + history + question
        ├→ [4] Kiểm tra `_gemmaService.hasActiveSession`
@@ -107,6 +107,8 @@ ChatView (StatefulWidget)
        │              ├── ChatThinking → _ThinkingBubble (3 chấm animation)
        │              └── ChatStreaming → MessageBubble(isStreaming: true)
        ├── _ScrollToBottomButton (AnimatedOpacity + AnimatedSlide, "Mới nhất")
+       ├── _AttachedFilesBar (StatefulWidget, BlocBuilder<SessionFilesCubit>) ← MỚI
+       │    └── _FileChip (icon trạng thái + tên + progress % + popup menu Retry/Remove)
        └── ChatInputBar (BlocListener → setState local _isStreaming)
 ```
 
@@ -154,24 +156,30 @@ session_document_refs (junction table — attach global docs vào session):
 ### KnowledgeScope enum (lib/core/constants/document_constants.dart)
 ```dart
 enum KnowledgeScope {
-  sessionOnly,        // Chỉ file upload trong session này
-  globalOnly,         // Chỉ Global KB
-  globalAndSession,   // Cả hai (default)
+  attachedOnly,        // Chỉ file upload trong session này
+  globalOnly,          // Chỉ Global KB
+  attachedAndGlobal,   // Cả hai (default)
 }
 ```
 
 Lưu theo conversation, persist qua session — không mất khi restart app.
 
-### RAG Filter Architecture (2-step: filter trước ranking)
+### RAG Filter Architecture (2-step: filter trước ranking, chỉ lấy completed)
 ```
 Search:
-  1. Xác định allowedDocumentIds theo KnowledgeScope
-     - attachedOnly: WHERE sessionId = currentSessionId (session docs) + session_document_refs (referenced global docs)
-     - globalOnly: WHERE sessionId IS NULL
-     - attachedAndGlobal: WHERE sessionId IS NULL OR sessionId = currentSessionId
-  2. Pre-topK (200 candidates) → cosine similarity
-  3. Re-rank → topK (20)
+  1. Xác định allowedDocumentIds theo KnowledgeScope (CHỈ lấy status=completed)
+     - attachedOnly: getCompletedDocumentIdsBySessionId + getCompletedDocumentIdsByIds(refDocIds)
+     - globalOnly: getCompletedGlobalDocumentIds()
+     - attachedAndGlobal: global completed + session completed + ref completed
+  2. Nếu allowedDocIds rỗng → early return (RagContext.empty) — không embed, không search
+  3. Pre-topK (200 candidates) → cosine similarity
+  4. Re-rank → topK (20)
 ```
+
+**Nguyên tắc:** Mọi document đi vào RAG đều phải có `status == completed`. Không ngoại lệ.
+- Session-uploaded docs: filter `sessionId + completed`
+- Referenced global docs: filter `id IN refDocIds + completed`
+- Global docs: filter `sessionId IS NULL + completed`
 
 **Fix logic:** Filter trước ranking, không filter sau topK (tránh mất kết quả hợp lệ).
 
@@ -189,8 +197,15 @@ Upload file → ChatPage 📎
                            Insert   0.95 → 1.00  (chunks + vectors)
                            Complete 1.00          (status=completed)
 
-Granular progress (hiển thị realtime trên SessionFilesPanel):
+Granular progress (hiển thị realtime trên SessionFilesPanel + _AttachedFilesBar):
   contract.pdf  [████████░░] 82%
+
+Gecko Embedding Guard (tránh lỗi ModelNotLoadedException):
+  if (!_gecko.isReady) {
+    throw UploadQueueException('Embedding model chưa sẵn sàng...');
+  }
+  → Single catch block xử lý: update status=failed + incrementRetryCount
+  → Không update DB trước khi throw (tránh duplicate write)
 
 Retry (khi status=failed):
   SessionFilesPanel → Refresh button
@@ -218,6 +233,21 @@ SessionFilesCubit (Bloc):
   - Subscribes: watchAllDocuments() + queue.resultStream + queue.stateStream
   - Filter theo sessionId → SessionFileItem(name, status, progress, errorMessage, retryCount)
   - Emit: SessionFilesLoaded(files, queueState, pendingCount)
+  - Method: detachDocument(documentId) — ownership-based delete/detach
+  - Method: hasProcessingFiles(files) — kiểm tra pending/processing
+```
+
+### detachDocument() — Ownership-based Delete/Detach
+```
+detachDocument(documentId):
+  ├→ doc = getDocumentById(documentId)
+  ├→ if doc.sessionId == sessionId:
+  │    └→ documentsDao.deleteDocument(documentId) // cascade chunks + vectors
+  └→ else:
+       └→ refsDao.detachDocument(sessionId, documentId) // chỉ xoá session_document_refs
+
+TODO: Khi owner session xoá document, kiểm tra còn session refs khác không.
+Nếu có → convert sang global document hoặc yêu cầu confirm.
 ```
 
 ### Cascade Delete
@@ -234,19 +264,19 @@ Delete Session
 - `lib/database/tables/documents_table.dart` — Schema (sessionId, status, progress, errorMessage, retryCount, lastProcessedAt)
 - `lib/database/tables/sessions_table.dart` — Schema (knowledgeScope)
 - `lib/database/tables/session_document_refs_table.dart` — Junction table (sessionId, documentId, attachedAt)
-- `lib/database/daos/documents_dao.dart` — Queries: getDocumentsBySessionId, getDocumentIdsByScope, updateDocumentProgress, getDocumentsByRetryNeeded, incrementRetryCount, resetRetryCount
+- `lib/database/daos/documents_dao.dart` — Queries: +getCompletedDocumentIdsBySessionId, +getCompletedDocumentIdsByIds, +getCompletedGlobalDocumentIds; existing: getDocumentsBySessionId, getDocumentIdsByScope, updateDocumentProgress, getDocumentsByRetryNeeded, incrementRetryCount, resetRetryCount
 - `lib/database/daos/session_document_refs_dao.dart` — CRUD cho attached refs
 - `lib/services/rag/rag_service.dart` — retrieve(scope, sessionId)
-- `lib/services/rag/rag_service_impl.dart` — Scope-based document filter + session_document_refs support
+- `lib/services/rag/rag_service_impl.dart` — Scope-based document filter (chỉ completed) + early return khi rỗng
 - `lib/services/vectorstore/vector_store_service.dart` — 2-step search: filter→preTopK→re-rank
-- `lib/services/chunker/document_upload_queue.dart` — FIFO queue + retry + granular progress
+- `lib/services/chunker/document_upload_queue.dart` — FIFO queue + retry + granular progress + Gecko guard (UploadQueueException)
 - `lib/services/gecko/gecko_service.dart` — FIFO lock (Completer)
 - `lib/features/chat/bloc/chat_bloc.dart` — KnowledgeScopeChanged event, load scope từ session
 - `lib/features/session/models/session_model.dart` — knowledgeScope field
-- `lib/features/knowledge/bloc/session_files_cubit.dart` — File list cubit (watch DB + queue)
+- `lib/features/knowledge/bloc/session_files_cubit.dart` — File list cubit (watch DB + queue) + detachDocument() + hasProcessingFiles()
 - `lib/features/knowledge/views/session_files_panel.dart` — Bottom sheet UI (status, progress %, retry button)
-- `lib/features/chat/views/chat_page.dart` — 📎 Attach button + file picker + attach menu
-- `lib/injection/service_locator.dart` — Register DocumentUploadQueue + SessionFilesCubit
+- `lib/features/chat/views/chat_page.dart` — 📎 Attach button + file picker + attach menu + _AttachedFilesBar + _FileChip
+- `lib/injection/service_locator.dart` — Register DocumentUploadQueue + SessionFilesCubit (với refsDao)
 
 ---
 
@@ -372,8 +402,8 @@ abstract interface class RagService {
   Future<RagContext> retrieve({
     required String query,
     required int tokenBudget,
-    required KnowledgeScope scope,    // MỚI: scope filter
-    String? sessionId,                // MỚI: session-specific docs
+    required KnowledgeScope scope,
+    String? sessionId,
   });
 }
 
@@ -383,13 +413,17 @@ RagContext:
   - bestScore: double? (top-1 score, null nếu không có chunks)
   - hasContext: bool (getter: chunks.isNotEmpty)
 
-RagServiceImpl:
+RagServiceImpl pipeline (2026 update):
   1. Embed query → GeckoService
-  2. Filter document IDs theo KnowledgeScope (filter trước ranking)
-  3. Vector search → VectorStoreService (topK: 20, threshold: 0.7, allowedDocumentIds)
-  4. Chunk-level trim → break khi vượt tokenBudget
-  5. Log RagTelemetry
-  6. Return RagContext
+  2. Filter document IDs theo KnowledgeScope (chỉ lấy completed):
+     - attachedOnly: getCompletedDocumentIdsBySessionId + getCompletedDocumentIdsByIds(refDocIds)
+     - globalOnly: getCompletedGlobalDocumentIds()
+     - attachedAndGlobal: global completed + session completed + ref completed
+  3. Nếu allowedDocIds rỗng → early return RagContext.empty (không embed, không search)
+  4. Vector search → VectorStoreService (topK: 20, threshold: 0.7, allowedDocumentIds)
+  5. Chunk-level trim → break khi vượt tokenBudget
+  6. Log RagTelemetry
+  7. Return RagContext
 
 VectorStoreService 2-step search:
   - Step 1: Filter candidates bằng allowedDocumentIds (WHERE documentId IN ...)
@@ -463,7 +497,8 @@ AppException (base)
 ├── InsufficientMemoryException    → warning dialog
 ├── DocumentParseException         → error snackbar
 ├── EmbeddingException             → error, allow retry
-└── StorageException               → error, log
+├── StorageException               → error, log
+└── UploadQueueException (mới)     → Gecko chưa ready, file upload fail với message rõ ràng
 ```
 
 ### Runtime errors (non-AppException)
@@ -499,6 +534,8 @@ ChatBloc constructor:
   memoryStore, summaryService, ragService, promptBuilder, contextWindow
   (KHÔNG còn: geckoService, vectorStore, contextManager, promptBuilder cũ)
   (MỚI: ragService, promptBuilder)
+
+SessionFilesCubit — registerLazySingleton, inject documentsDao + refsDao + uploadQueue
 ```
 
 ---
@@ -509,7 +546,7 @@ lib/
 ├── core/
 │   ├── constants/
 │   │   └── model_constants.dart   ← kGemmaMaxTokens = 2048, ratio constants
-│   ├── errors/                    ← app_exception.dart (ModelTimeoutException)
+│   ├── errors/                    ← app_exception.dart (+UploadQueueException)
 │   └── utils/
 │       └── token_estimator.dart   ← estimateTokens(), estimateMessageTokens()
 ├── features/
@@ -517,12 +554,12 @@ lib/
 │   │   ├── bloc/                  ← chat_bloc.dart (session-based, token budget dynamic)
 │   │   ├── models/
 │   │   ├── repositories/
-│   │   └── views/                 ← chat_page.dart (+📎 attach file), message_bubble.dart, rag_sources_widget.dart
+│   │   └── views/                 ← chat_page.dart (+📎 attach file, +_AttachedFilesBar, +_FileChip), message_bubble.dart, rag_sources_widget.dart
 │   ├── session/
 │   ├── knowledge/
 │   │   ├── bloc/
 │   │   │   ├── knowledge_bloc.dart
-│   │   │   └── session_files_cubit.dart  ← file list cubit (watch DB + queue)
+│   │   │   └── session_files_cubit.dart  ← file list cubit (detachDocument, hasProcessingFiles)
 │   │   └── views/
 │   │       └── session_files_panel.dart ← bottom sheet (progress %, retry)
 │   └── model_manager/
@@ -534,8 +571,8 @@ lib/
 │   ├── vectorstore/
 │   ├── chunker/
 │   │   ├── chunking_service.dart
-│   │   └── document_upload_queue.dart ← FIFO queue + retry + granular progress
-│   ├── rag/                       ← rag_service, rag_context, rag_service_impl (RAG pipeline interface)
+│   │   └── document_upload_queue.dart ← FIFO queue + retry + granular progress + Gecko guard
+│   ├── rag/                       ← rag_service, rag_context, rag_service_impl (RAG pipeline, completed filter)
 │   ├── memory_store/              ← memory_store_service, summary_service, memory_prompt_formatter
 │   ├── context/                   ← context_manager_service.dart (@Deprecated)
 │   ├── prompt/                    ← prompt_builder_service.dart (interface PromptBuilder + PromptBuilderImpl)
@@ -544,9 +581,13 @@ lib/
 ├── database/
 │   ├── app_database.dart
 │   ├── daos/
+│   │   ├── documents_dao.dart     ← +getCompletedDocumentIdsBySessionId, +getCompletedDocumentIdsByIds, +getCompletedGlobalDocumentIds
+│   │   ├── session_document_refs_dao.dart
+│   │   ├── chunks_dao.dart
+│   │   └── ...
 │   └── tables/
 └── injection/
-    └── service_locator.dart
+    └── service_locator.dart       ← SessionFilesCubit injects refsDao
 ```
 
 ---
@@ -581,6 +622,12 @@ lib/
 | **Upload blocking UI — không biết tiến độ indexing** | DocumentUploadQueue FIFO pipeline + granular progress (0-10% parse, 10-20% chunk, 20-95% embed per chunk, 95-100% insert) |
 | **File lỗi không thể retry** | Thêm queue.retry(documentId) — check status=failed, reset, enqueuePriority. SessionFilesPanel có refresh button |
 | **Không có UI quản lý file trong session** | Thêm SessionFilesCubit (watch DB + queue) + SessionFilesPanel (bottom sheet, progress %, retry button, pending badge) |
+| **SessionFilesCubit báo ProviderNotFoundException** | Thêm BlocProvider<SessionFilesCubit> vào MultiBlocProvider trong app.dart |
+| **Upload queue fail vì Gecko chưa ready (ModelNotLoadedException)** | Thêm Gecko guard: `if (!_gecko.isReady) throw UploadQueueException(...)` — single catch block xử lý, không duplicate write |
+| **RAG search bao gồm cả documents chưa index xong (processing)** | Thêm 3 DAO method: `getCompletedDocumentIdsBySessionId`, `getCompletedDocumentIdsByIds`, `getCompletedGlobalDocumentIds` — RAG chỉ search documents có `status == completed` |
+| **Không có UI hiển thị file attached trên input bar** | Thêm `_AttachedFilesBar` + `_FileChip` widget với trạng thái, progress %, popup menu Retry/Remove |
+| **detachDocument() dùng sai logic (exists() thay vì ownership)** | Sửa thành ownership-based: `doc.sessionId == sessionId` → delete, else → detach ref. Thêm TODO cho multi-session sharing. |
+| **Không warning khi file đang index** | Thêm warning banner "Some attached files are still being indexed." trong `_AttachedFilesBar` |
 
 ---
 

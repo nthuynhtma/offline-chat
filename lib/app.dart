@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import 'package:offline_chat/features/chat/views/chat_page.dart';
 import 'package:offline_chat/features/knowledge/bloc/knowledge_bloc.dart';
+import 'package:offline_chat/features/knowledge/bloc/session_files_cubit.dart';
 import 'package:offline_chat/features/knowledge/views/knowledge_page.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/model_manager/views/model_manager_page.dart';
@@ -65,6 +66,9 @@ class App extends StatelessWidget {
         ),
         BlocProvider<KnowledgeBloc>(
           create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded()),
+        ),
+        BlocProvider<SessionFilesCubit>(
+          create: (_) => sl<SessionFilesCubit>(),
         ),
       ],
       child: ValueListenableBuilder<ThemeMode>(

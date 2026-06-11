@@ -177,6 +177,17 @@ class DocumentUploadQueue {
       await _setProgress(job.documentId, 0.20);
 
       // ─── Step 3: Embed từng chunk (0.20 → 0.95) ───────────────────────
+      // Guard: Gecko phải ready trước khi embed
+      if (!_gecko.isReady) {
+        logger.log.w(
+          '[UploadQueue] Gecko not ready. Document=${job.name} (${job.documentId})',
+        );
+        throw const UploadQueueException(
+          'Embedding model (Gecko) chưa sẵn sàng. '
+          'Vui lòng đợi model khởi tạo xong rồi thử lại.',
+        );
+      }
+
       final totalChunks = chunks.length;
 
       final allEmbeddings = <List<double>>[];

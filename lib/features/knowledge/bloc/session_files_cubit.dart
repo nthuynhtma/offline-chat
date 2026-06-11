@@ -74,6 +74,7 @@ class SessionFileItem extends Equatable {
 ///   3. `DocumentUploadQueue.stateStream` — trạng thái queue
 class SessionFilesCubit extends Cubit<SessionFilesState> {
   final DocumentsDao _documentsDao;
+  final SessionDocumentRefsDao _refsDao;
   final DocumentUploadQueue _uploadQueue;
 
   /// Subscription cho DB stream.
@@ -90,8 +91,10 @@ class SessionFilesCubit extends Cubit<SessionFilesState> {
 
   SessionFilesCubit({
     required DocumentsDao documentsDao,
+    required SessionDocumentRefsDao refsDao,
     required DocumentUploadQueue uploadQueue,
   })  : _documentsDao = documentsDao,
+        _refsDao = refsDao,
         _uploadQueue = uploadQueue,
         super(const SessionFilesLoading());
 
@@ -148,6 +151,39 @@ class SessionFilesCubit extends Cubit<SessionFilesState> {
     } catch (e) {
       emit(SessionFilesError(e.toString()));
     }
+  }
+
+  /// Detach/remove một document khỏi session.
+  ///
+  /// - Nếu document thuộc sở hữu của session này (doc.sessionId == sessionId)
+  ///   → xoá hoàn toàn (cascade chunks + vectors).
+  /// - Nếu là referenced global document → chỉ xoá row trong session_document_refs.
+  ///
+  /// TODO: Khi owner session xoá document, kiểm tra còn session refs khác không.
+  /// Nếu có → convert sang global document hoặc yêu cầu confirm.
+  Future<void> detachDocument(String documentId) async {
+    final sessionId = _sessionId;
+    if (sessionId == null) return;
+
+    final doc = await _documentsDao.getDocumentById(documentId);
+    if (doc == null) return;
+
+    // Ownership quyết định: session-uploaded → delete, referenced → detach
+    if (doc.sessionId == sessionId) {
+      await _documentsDao.deleteDocument(documentId);
+      // Cascade DB tự xoá chunks + vectors
+    } else {
+      await _refsDao.detachDocument(sessionId, documentId);
+    }
+  }
+
+  /// Có file nào đang pending hoặc processing không.
+  bool hasProcessingFiles(List<SessionFileItem> files) {
+    return files.any(
+      (f) =>
+          f.status == IndexStatus.processing ||
+          f.status == IndexStatus.pending,
+    );
   }
 
   @override

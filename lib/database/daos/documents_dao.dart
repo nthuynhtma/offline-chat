@@ -25,6 +25,44 @@ class DocumentsDao extends DatabaseAccessor<AppDatabase>
         .get();
   }
 
+  // ─── Completed document queries (cho RAG filter) ─────────────────────────
+
+  /// Lấy IDs của session-uploaded documents có status=completed.
+  Future<Set<String>> getCompletedDocumentIdsBySessionId(
+      String sessionId) async {
+    final rows = await (select(documents)
+          ..where((d) =>
+              d.sessionId.equals(sessionId) &
+              d.status.equals(IndexStatus.completed.toInt))
+          ..orderBy([(d) => OrderingTerm.desc(d.createdAt)]))
+        .get();
+    return rows.map((d) => d.id).toSet();
+  }
+
+  /// Lọc ra IDs đã completed từ một set IDs bất kỳ (dùng cho referenced docs).
+  Future<Set<String>> getCompletedDocumentIdsByIds(
+      Set<String> ids) async {
+    if (ids.isEmpty) return {};
+    final rows = await (select(documents)
+          ..where((d) =>
+              d.id.isIn(ids) &
+              d.status.equals(IndexStatus.completed.toInt))
+          ..orderBy([(d) => OrderingTerm.desc(d.createdAt)]))
+        .get();
+    return rows.map((d) => d.id).toSet();
+  }
+
+  /// Lấy IDs của global documents (sessionId=null) có status=completed.
+  Future<Set<String>> getCompletedGlobalDocumentIds() async {
+    final rows = await (select(documents)
+          ..where((d) =>
+              d.sessionId.isNull() &
+              d.status.equals(IndexStatus.completed.toInt))
+          ..orderBy([(d) => OrderingTerm.desc(d.createdAt)]))
+        .get();
+    return rows.map((d) => d.id).toSet();
+  }
+
   /// Lấy document IDs phù hợp với KnowledgeScope để filter vector search.
   Future<Set<String>> getDocumentIdsByScope({
     required KnowledgeScope scope,

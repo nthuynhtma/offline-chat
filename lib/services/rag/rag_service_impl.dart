@@ -65,39 +65,40 @@ class RagServiceImpl implements RagService {
     }
     final embedTime = stopwatch.elapsedMilliseconds;
 
-    // 2. Xác định document IDs theo scope (filter trước ranking)
+    // 2. Xác định document IDs theo scope (chỉ lấy documents đã completed)
     Set<String>? allowedDocIds;
     try {
       if (scope == KnowledgeScope.attachedOnly && sessionId != null) {
-        // Session documents + attached global docs
-        final sessionDocs = await _db.documentsDao.getDocumentsBySessionId(sessionId);
-        final refDocIds = await _db.sessionDocumentRefsDao.getDocumentIdsBySession(sessionId);
-        allowedDocIds = {
-          ...sessionDocs.map((d) => d.id),
-          ...refDocIds,
-        };
+        // Session documents (completed) + referenced global docs (completed)
+        final sessionDocIds = await _db.documentsDao
+            .getCompletedDocumentIdsBySessionId(sessionId);
+        final refDocIds = await _db.sessionDocumentRefsDao
+            .getDocumentIdsBySession(sessionId);
+        // Filter referenced docs: chỉ lấy những doc đã completed
+        final completedRefDocIds = refDocIds.isNotEmpty
+            ? await _db.documentsDao.getCompletedDocumentIdsByIds(refDocIds)
+            : <String>{};
+        allowedDocIds = {...sessionDocIds, ...completedRefDocIds};
       } else if (scope == KnowledgeScope.globalOnly) {
-        // Global documents only
-        final docs = await _db.documentsDao.getDocumentsBySessionId(null);
-        allowedDocIds = docs.map((d) => d.id).toSet();
+        // Global documents only (completed)
+        allowedDocIds = await _db.documentsDao.getCompletedGlobalDocumentIds();
       } else if (scope == KnowledgeScope.attachedAndGlobal) {
-        // Global + session + attached global docs
-        final globalDocs = await _db.documentsDao.getDocumentsBySessionId(null);
-        final sessionDocs = sessionId != null
-            ? await _db.documentsDao.getDocumentsBySessionId(sessionId)
-            : <Document>[];
+        // Global + session + attached global docs (tất cả completed)
+        final globalDocIds = await _db.documentsDao.getCompletedGlobalDocumentIds();
+        final sessionDocIds = sessionId != null
+            ? await _db.documentsDao.getCompletedDocumentIdsBySessionId(sessionId)
+            : <String>{};
         final refDocIds = sessionId != null
             ? await _db.sessionDocumentRefsDao.getDocumentIdsBySession(sessionId)
             : <String>{};
-        allowedDocIds = {
-          ...globalDocs.map((d) => d.id),
-          ...sessionDocs.map((d) => d.id),
-          ...refDocIds,
-        };
+        final completedRefDocIds = refDocIds.isNotEmpty
+            ? await _db.documentsDao.getCompletedDocumentIdsByIds(refDocIds)
+            : <String>{};
+        allowedDocIds = {...globalDocIds, ...sessionDocIds, ...completedRefDocIds};
       }
-      // Nếu không có documents nào trong scope → skip RAG
+      // Nếu không có documents nào trong scope → skip RAG (early return, không embed)
       if (allowedDocIds != null && allowedDocIds.isEmpty) {
-        log_util.log.i('🔍 [RagService] Không có documents trong scope ($scope) — skip RAG');
+        log_util.log.i('🔍 [RagService] Không có completed documents trong scope ($scope) — skip RAG');
         return RagContext(chunks: [], tokenCount: 0);
       }
     } catch (e) {
