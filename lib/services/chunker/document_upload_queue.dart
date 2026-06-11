@@ -250,7 +250,7 @@ class DocumentUploadQueue {
         success: true,
         chunkCount: chunks.length,
       ));
-    } catch (e, stackTrace) {
+    } catch (e) {
       logger.log.e('[UploadQueue] Failed: ${job.name} — $e');
 
       // Update status + error

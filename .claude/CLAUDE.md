@@ -94,27 +94,44 @@ User pop ChatPage (Destroy)
   └→ ChatBloc.close(): cancel ModelBloc subscription, clear accumulated text
 ```
 
-### 2. Kiến trúc UI - Tối ưu rebuild
+### 2. Kiến trúc UI - Tối ưu rebuild (Refactored 11/06/2026)
 ```
-ChatView (StatefulWidget)
-  ├── AppBar → _ClearButton (BlocBuilder riêng, buildWhen: streaming/thinking state change)
+ChatView (StatefulWidget) — lib/features/chat/views/chat_page.dart (167 dòng)
+  ├── AppBar
+  │    ├── ScopeSelector (PopupMenuButton, KnowledgeScope selector)
+  │    └── ClearButton (BlocBuilder riêng, buildWhen: streaming/thinking state change)
   └── Column
-       ├── _ModelNotInstalledBanner (BlocBuilder riêng)
-       ├── Expanded → _ChatBody (BlocBuilder, buildWhen: trừ ChatThinking→ChatThinking)
-       │    └── _MessageList (StatefulWidget, ScrollController + ListViewObserver)
+       ├── ModelNotInstalledBanner (BlocBuilder riêng)
+       ├── Expanded → ChatBody (BlocBuilder, buildWhen: trừ ChatThinking→ChatThinking)
+       │    └── MessageList (StatefulWidget, ScrollController + ListViewObserver)
        │         ├── MessageBubble (messages từ DB, dùng MarkdownBody cho AI)
-       │         └── _LastBubble (BlocBuilder riêng, buildWhen: streamingText change)
-       │              ├── ChatThinking → _ThinkingBubble (3 chấm animation)
-       │              └── ChatStreaming → MessageBubble(isStreaming: true)
-       ├── _ScrollToBottomButton (AnimatedOpacity + AnimatedSlide, "Mới nhất")
-       ├── _AttachedFilesBar (StatefulWidget, BlocBuilder<SessionFilesCubit>) ← MỚI
-       │    └── _FileChip (icon trạng thái + tên + progress % + popup menu Retry/Remove)
+       │         ├── LastBubble (BlocBuilder riêng, buildWhen: streamingText change)
+       │         │    ├── ChatThinking → ThinkingBubble (3 chấm animation)
+       │         │    └── ChatStreaming → MessageBubble(isStreaming: true)
+       │         └── ScrollToBottomButton (AnimatedOpacity + AnimatedSlide, "Mới nhất")
+       ├── AttachedFilesBar (StatefulWidget, BlocBuilder<SessionFilesCubit>)
+       │    └── FileChip (icon trạng thái + tên + progress % + popup menu Retry/Remove)
        └── ChatInputBar (BlocListener → setState local _isStreaming)
+
+Tất cả widgets con đã được tách vào lib/features/chat/widgets/:
+  - model_not_installed_banner.dart
+  - scope_selector.dart (+ ScopeOption)
+  - clear_button.dart
+  - chat_body.dart
+  - error_banner.dart
+  - message_list.dart
+  - scroll_to_bottom_button.dart
+  - last_bubble.dart
+  - thinking_bubble.dart
+  - attached_files_bar.dart (+ FileChip)
+  - chat_input_bar.dart
+
+Lợi ích: Code giảm 85% (1223→167 dòng), mỗi widget có trách nhiệm rõ ràng, dễ test, tái sử dụng.
 ```
 
 ### 3. Auto-scroll mechanism
 ```
-_MessageListState:
+MessageList (lib/features/chat/widgets/message_list.dart):
   - _isNearBottom: phát hiện qua ListViewObserver.onObserve
   - _scrollToBottom(): method tái sử dụng
   - initState(): addPostFrameCallback → _scrollToBottom() (lần đầu vào chat)
@@ -200,12 +217,21 @@ Upload file → ChatPage 📎
 Granular progress (hiển thị realtime trên SessionFilesPanel + _AttachedFilesBar):
   contract.pdf  [████████░░] 82%
 
-Gecko Embedding Guard (tránh lỗi ModelNotLoadedException):
-  if (!_gecko.isReady) {
-    throw UploadQueueException('Embedding model chưa sẵn sàng...');
-  }
-  → Single catch block xử lý: update status=failed + incrementRetryCount
-  → Không update DB trước khi throw (tránh duplicate write)
+Gecko Embedding Guard (defensive — UI gate trước):
+  UI layer (ChatInputBar):
+    - context.watch<ModelBloc>().state → isGeckoReady
+    - Nếu Gecko chưa ready: nút 📎 disabled, tooltip "Preparing AI models..."
+    - Khi ModelBloc emit ModelLoaded(geckoReady: true) → rebuild → 📎 enabled ngay
+  
+  Service layer (defensive — nếu bypass UI qua deep link, test, dev tool):
+    if (!_gecko.isReady) {
+      throw UploadQueueException('Embedding model chưa sẵn sàng...');
+    }
+    → Single catch block xử lý: update status=failed + incrementRetryCount
+    → Không update DB trước khi throw (tránh duplicate write)
+  
+  Trong luồng sử dụng bình thường, service guard không bao giờ chạy
+  — UI đã chặn từ đầu. Guard chỉ là safety net.
 
 Retry (khi status=failed):
   SessionFilesPanel → Refresh button
@@ -554,7 +580,19 @@ lib/
 │   │   ├── bloc/                  ← chat_bloc.dart (session-based, token budget dynamic)
 │   │   ├── models/
 │   │   ├── repositories/
-│   │   └── views/                 ← chat_page.dart (+📎 attach file, +_AttachedFilesBar, +_FileChip), message_bubble.dart, rag_sources_widget.dart
+│   │   ├── views/                 ← chat_page.dart (167 dòng, refactored 11/06/2026), message_bubble.dart, rag_sources_widget.dart
+│   │   └── widgets/               ← Tách từ chat_page.dart (11/06/2026)
+│   │       ├── model_not_installed_banner.dart
+│   │       ├── scope_selector.dart
+│   │       ├── clear_button.dart
+│   │       ├── chat_body.dart
+│   │       ├── error_banner.dart
+│   │       ├── message_list.dart
+│   │       ├── scroll_to_bottom_button.dart
+│   │       ├── last_bubble.dart
+│   │       ├── thinking_bubble.dart
+│   │       ├── attached_files_bar.dart
+│   │       └── chat_input_bar.dart
 │   ├── session/
 │   ├── knowledge/
 │   │   ├── bloc/
@@ -601,6 +639,7 @@ lib/
 | `add()` trong `stream.listen()` gây race condition | Bọc trong `Future.microtask()` |
 | Model treo → UI block vô hạn | Thêm `.timeout(Duration(seconds: 120))` + `ModelTimeoutException` |
 | BlocBuilder rebuild toàn bộ UI mỗi token | Tách 5 widget con với `buildWhen` riêng |
+| **ChatPage quá nhiều code UI (1223 dòng) — khó maintain** | **Refactor 11/06/2026**: Tách 11 widget con vào `lib/features/chat/widgets/` — giảm 85% code (1223→167 dòng). Mỗi widget có trách nhiệm rõ ràng, dễ test, tái sử dụng. Public widgets thay vì private `_Widget`. |
 | Summarize block inference → TTFT bị trễ | Chạy background với `unawaited()`, dùng cache cho request sau |
 | **maxTokens=1024 → lỗi tràn token (1073 >= 1024)** | Tăng `kGemmaMaxTokens = 2048` trong `model_constants.dart` |
 | **Prompt quá dài do build toàn bộ history mỗi lần** | Chuyển sang **Session-based API**: `createSession` + `generateWithSession` |
@@ -628,6 +667,7 @@ lib/
 | **Không có UI hiển thị file attached trên input bar** | Thêm `_AttachedFilesBar` + `_FileChip` widget với trạng thái, progress %, popup menu Retry/Remove |
 | **detachDocument() dùng sai logic (exists() thay vì ownership)** | Sửa thành ownership-based: `doc.sessionId == sessionId` → delete, else → detach ref. Thêm TODO cho multi-session sharing. |
 | **Không warning khi file đang index** | Thêm warning banner "Some attached files are still being indexed." trong `_AttachedFilesBar` |
+| **📎 Attach button disabled vĩnh viễn khi Gecko chưa ready** | **UI Gate + Reactive fix**: Xóa snapshot `_gecko.isReady` trong `initState()`, thay bằng `context.watch<ModelBloc>().state` với switch pattern matching (`ModelLoaded(:final geckoReady) => geckoReady`). Gecko ready → nút attach enabled ngay không cần reopen. (22/06/2026) |
 
 ---
 

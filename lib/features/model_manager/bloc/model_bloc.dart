@@ -123,6 +123,9 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   StreamSubscription<ModelInfo>? _progressSubscription;
   bool _tokenizerDownloaded = false;
 
+  /// Guard chống gọi _onStatusChecked đồng thời.
+  bool _isCheckingStatus = false;
+
   /// Completer hoàn thành khi Gemma init xong (thành công hoặc thất bại).
   /// ChatPage có thể dùng để biết init đã chạy xong chưa.
   Completer<bool>? _gemmaInitCompleter;
@@ -156,6 +159,8 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     StatusChecked event,
     Emitter<ModelState> emit,
   ) async {
+    if (_isCheckingStatus) return; // Guard chống gọi đồng thời
+    _isCheckingStatus = true;
     emit(const ModelLoading());
     try {
       await _modelManager.initialize();
@@ -169,12 +174,14 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       bool gemmaReady = _gemmaService.isReady;
       bool geckoReady = _geckoService.isReady;
 
+      // Idempotent: chỉ init Gemma nếu chưa ready và đã download
       if (gemmaDownloaded && !gemmaReady) {
-        // Tạo Completer trước khi init để ChatPage biết đang chạy
         _gemmaInitCompleter = Completer<bool>();
         gemmaReady = await _tryInitializeGemma();
         _gemmaInitCompleter!.complete(gemmaReady);
       }
+
+      // Idempotent: chỉ init Gecko nếu chưa ready và đã download
       if (geckoDownloaded && !geckoReady) {
         final tokenizerValid =
             await _modelManager.isModelFileValid(kGeckoTokenizerFileName);
@@ -191,6 +198,8 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     } catch (e) {
       _gemmaInitCompleter?.complete(false);
       emit(ModelError(e.toString()));
+    } finally {
+      _isCheckingStatus = false;
     }
   }
 
