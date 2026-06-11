@@ -33,8 +33,17 @@ class $SessionsTable extends Sessions with TableInfo<$SessionsTable, Session> {
   late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
       'updated_at', aliasedName, false,
       type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _knowledgeScopeMeta =
+      const VerificationMeta('knowledgeScope');
   @override
-  List<GeneratedColumn> get $columns => [id, title, createdAt, updatedAt];
+  late final GeneratedColumn<int> knowledgeScope = GeneratedColumn<int>(
+      'knowledge_scope', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(2));
+  @override
+  List<GeneratedColumn> get $columns =>
+      [id, title, createdAt, updatedAt, knowledgeScope];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -68,6 +77,12 @@ class $SessionsTable extends Sessions with TableInfo<$SessionsTable, Session> {
     } else if (isInserting) {
       context.missing(_updatedAtMeta);
     }
+    if (data.containsKey('knowledge_scope')) {
+      context.handle(
+          _knowledgeScopeMeta,
+          knowledgeScope.isAcceptableOrUnknown(
+              data['knowledge_scope']!, _knowledgeScopeMeta));
+    }
     return context;
   }
 
@@ -85,6 +100,8 @@ class $SessionsTable extends Sessions with TableInfo<$SessionsTable, Session> {
           .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
       updatedAt: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
+      knowledgeScope: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}knowledge_scope'])!,
     );
   }
 
@@ -99,11 +116,15 @@ class Session extends DataClass implements Insertable<Session> {
   final String title;
   final DateTime createdAt;
   final DateTime updatedAt;
+
+  /// KnowledgeScope enum: 0=sessionOnly, 1=globalOnly, 2=globalAndSession (default)
+  final int knowledgeScope;
   const Session(
       {required this.id,
       required this.title,
       required this.createdAt,
-      required this.updatedAt});
+      required this.updatedAt,
+      required this.knowledgeScope});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -111,6 +132,7 @@ class Session extends DataClass implements Insertable<Session> {
     map['title'] = Variable<String>(title);
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['knowledge_scope'] = Variable<int>(knowledgeScope);
     return map;
   }
 
@@ -120,6 +142,7 @@ class Session extends DataClass implements Insertable<Session> {
       title: Value(title),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
+      knowledgeScope: Value(knowledgeScope),
     );
   }
 
@@ -131,6 +154,7 @@ class Session extends DataClass implements Insertable<Session> {
       title: serializer.fromJson<String>(json['title']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      knowledgeScope: serializer.fromJson<int>(json['knowledgeScope']),
     );
   }
   @override
@@ -141,6 +165,7 @@ class Session extends DataClass implements Insertable<Session> {
       'title': serializer.toJson<String>(title),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'knowledgeScope': serializer.toJson<int>(knowledgeScope),
     };
   }
 
@@ -148,12 +173,14 @@ class Session extends DataClass implements Insertable<Session> {
           {String? id,
           String? title,
           DateTime? createdAt,
-          DateTime? updatedAt}) =>
+          DateTime? updatedAt,
+          int? knowledgeScope}) =>
       Session(
         id: id ?? this.id,
         title: title ?? this.title,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
+        knowledgeScope: knowledgeScope ?? this.knowledgeScope,
       );
   Session copyWithCompanion(SessionsCompanion data) {
     return Session(
@@ -161,6 +188,9 @@ class Session extends DataClass implements Insertable<Session> {
       title: data.title.present ? data.title.value : this.title,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      knowledgeScope: data.knowledgeScope.present
+          ? data.knowledgeScope.value
+          : this.knowledgeScope,
     );
   }
 
@@ -170,13 +200,15 @@ class Session extends DataClass implements Insertable<Session> {
           ..write('id: $id, ')
           ..write('title: $title, ')
           ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('knowledgeScope: $knowledgeScope')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(id, title, createdAt, updatedAt);
+  int get hashCode =>
+      Object.hash(id, title, createdAt, updatedAt, knowledgeScope);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -184,7 +216,8 @@ class Session extends DataClass implements Insertable<Session> {
           other.id == this.id &&
           other.title == this.title &&
           other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.knowledgeScope == this.knowledgeScope);
 }
 
 class SessionsCompanion extends UpdateCompanion<Session> {
@@ -192,12 +225,14 @@ class SessionsCompanion extends UpdateCompanion<Session> {
   final Value<String> title;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
+  final Value<int> knowledgeScope;
   final Value<int> rowid;
   const SessionsCompanion({
     this.id = const Value.absent(),
     this.title = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.knowledgeScope = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   SessionsCompanion.insert({
@@ -205,6 +240,7 @@ class SessionsCompanion extends UpdateCompanion<Session> {
     required String title,
     required DateTime createdAt,
     required DateTime updatedAt,
+    this.knowledgeScope = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         title = Value(title),
@@ -215,6 +251,7 @@ class SessionsCompanion extends UpdateCompanion<Session> {
     Expression<String>? title,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
+    Expression<int>? knowledgeScope,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -222,6 +259,7 @@ class SessionsCompanion extends UpdateCompanion<Session> {
       if (title != null) 'title': title,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (knowledgeScope != null) 'knowledge_scope': knowledgeScope,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -231,12 +269,14 @@ class SessionsCompanion extends UpdateCompanion<Session> {
       Value<String>? title,
       Value<DateTime>? createdAt,
       Value<DateTime>? updatedAt,
+      Value<int>? knowledgeScope,
       Value<int>? rowid}) {
     return SessionsCompanion(
       id: id ?? this.id,
       title: title ?? this.title,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      knowledgeScope: knowledgeScope ?? this.knowledgeScope,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -256,6 +296,9 @@ class SessionsCompanion extends UpdateCompanion<Session> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<DateTime>(updatedAt.value);
     }
+    if (knowledgeScope.present) {
+      map['knowledge_scope'] = Variable<int>(knowledgeScope.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -269,6 +312,7 @@ class SessionsCompanion extends UpdateCompanion<Session> {
           ..write('title: $title, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('knowledgeScope: $knowledgeScope, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -634,9 +678,50 @@ class $DocumentsTable extends Documents
   late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
       'created_at', aliasedName, false,
       type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, name, path, sizeBytes, chunkCount, mimeType, createdAt];
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, true,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES sessions (id) ON DELETE CASCADE'));
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  @override
+  late final GeneratedColumn<int> status = GeneratedColumn<int>(
+      'status', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _progressMeta =
+      const VerificationMeta('progress');
+  @override
+  late final GeneratedColumn<double> progress = GeneratedColumn<double>(
+      'progress', aliasedName, false,
+      type: DriftSqlType.double,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0.0));
+  static const VerificationMeta _errorMessageMeta =
+      const VerificationMeta('errorMessage');
+  @override
+  late final GeneratedColumn<String> errorMessage = GeneratedColumn<String>(
+      'error_message', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        name,
+        path,
+        sizeBytes,
+        chunkCount,
+        mimeType,
+        createdAt,
+        sessionId,
+        status,
+        progress,
+        errorMessage
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -688,6 +773,24 @@ class $DocumentsTable extends Documents
     } else if (isInserting) {
       context.missing(_createdAtMeta);
     }
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    }
+    if (data.containsKey('status')) {
+      context.handle(_statusMeta,
+          status.isAcceptableOrUnknown(data['status']!, _statusMeta));
+    }
+    if (data.containsKey('progress')) {
+      context.handle(_progressMeta,
+          progress.isAcceptableOrUnknown(data['progress']!, _progressMeta));
+    }
+    if (data.containsKey('error_message')) {
+      context.handle(
+          _errorMessageMeta,
+          errorMessage.isAcceptableOrUnknown(
+              data['error_message']!, _errorMessageMeta));
+    }
     return context;
   }
 
@@ -711,6 +814,14 @@ class $DocumentsTable extends Documents
           .read(DriftSqlType.string, data['${effectivePrefix}mime_type'])!,
       createdAt: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id']),
+      status: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}status'])!,
+      progress: attachedDatabase.typeMapping
+          .read(DriftSqlType.double, data['${effectivePrefix}progress'])!,
+      errorMessage: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}error_message']),
     );
   }
 
@@ -728,6 +839,18 @@ class Document extends DataClass implements Insertable<Document> {
   final int chunkCount;
   final String mimeType;
   final DateTime createdAt;
+
+  /// null = Global KB, non-null = Session-specific document
+  final String? sessionId;
+
+  /// IndexStatus enum: 0=pending, 1=processing, 2=completed, 3=failed
+  final int status;
+
+  /// Progress 0.0 → 1.0 trong pipeline indexing
+  final double progress;
+
+  /// Thông báo lỗi nếu status=failed
+  final String? errorMessage;
   const Document(
       {required this.id,
       required this.name,
@@ -735,7 +858,11 @@ class Document extends DataClass implements Insertable<Document> {
       required this.sizeBytes,
       required this.chunkCount,
       required this.mimeType,
-      required this.createdAt});
+      required this.createdAt,
+      this.sessionId,
+      required this.status,
+      required this.progress,
+      this.errorMessage});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -746,6 +873,14 @@ class Document extends DataClass implements Insertable<Document> {
     map['chunk_count'] = Variable<int>(chunkCount);
     map['mime_type'] = Variable<String>(mimeType);
     map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || sessionId != null) {
+      map['session_id'] = Variable<String>(sessionId);
+    }
+    map['status'] = Variable<int>(status);
+    map['progress'] = Variable<double>(progress);
+    if (!nullToAbsent || errorMessage != null) {
+      map['error_message'] = Variable<String>(errorMessage);
+    }
     return map;
   }
 
@@ -758,6 +893,14 @@ class Document extends DataClass implements Insertable<Document> {
       chunkCount: Value(chunkCount),
       mimeType: Value(mimeType),
       createdAt: Value(createdAt),
+      sessionId: sessionId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sessionId),
+      status: Value(status),
+      progress: Value(progress),
+      errorMessage: errorMessage == null && nullToAbsent
+          ? const Value.absent()
+          : Value(errorMessage),
     );
   }
 
@@ -772,6 +915,10 @@ class Document extends DataClass implements Insertable<Document> {
       chunkCount: serializer.fromJson<int>(json['chunkCount']),
       mimeType: serializer.fromJson<String>(json['mimeType']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      sessionId: serializer.fromJson<String?>(json['sessionId']),
+      status: serializer.fromJson<int>(json['status']),
+      progress: serializer.fromJson<double>(json['progress']),
+      errorMessage: serializer.fromJson<String?>(json['errorMessage']),
     );
   }
   @override
@@ -785,6 +932,10 @@ class Document extends DataClass implements Insertable<Document> {
       'chunkCount': serializer.toJson<int>(chunkCount),
       'mimeType': serializer.toJson<String>(mimeType),
       'createdAt': serializer.toJson<DateTime>(createdAt),
+      'sessionId': serializer.toJson<String?>(sessionId),
+      'status': serializer.toJson<int>(status),
+      'progress': serializer.toJson<double>(progress),
+      'errorMessage': serializer.toJson<String?>(errorMessage),
     };
   }
 
@@ -795,7 +946,11 @@ class Document extends DataClass implements Insertable<Document> {
           int? sizeBytes,
           int? chunkCount,
           String? mimeType,
-          DateTime? createdAt}) =>
+          DateTime? createdAt,
+          Value<String?> sessionId = const Value.absent(),
+          int? status,
+          double? progress,
+          Value<String?> errorMessage = const Value.absent()}) =>
       Document(
         id: id ?? this.id,
         name: name ?? this.name,
@@ -804,6 +959,11 @@ class Document extends DataClass implements Insertable<Document> {
         chunkCount: chunkCount ?? this.chunkCount,
         mimeType: mimeType ?? this.mimeType,
         createdAt: createdAt ?? this.createdAt,
+        sessionId: sessionId.present ? sessionId.value : this.sessionId,
+        status: status ?? this.status,
+        progress: progress ?? this.progress,
+        errorMessage:
+            errorMessage.present ? errorMessage.value : this.errorMessage,
       );
   Document copyWithCompanion(DocumentsCompanion data) {
     return Document(
@@ -815,6 +975,12 @@ class Document extends DataClass implements Insertable<Document> {
           data.chunkCount.present ? data.chunkCount.value : this.chunkCount,
       mimeType: data.mimeType.present ? data.mimeType.value : this.mimeType,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      sessionId: data.sessionId.present ? data.sessionId.value : this.sessionId,
+      status: data.status.present ? data.status.value : this.status,
+      progress: data.progress.present ? data.progress.value : this.progress,
+      errorMessage: data.errorMessage.present
+          ? data.errorMessage.value
+          : this.errorMessage,
     );
   }
 
@@ -827,14 +993,18 @@ class Document extends DataClass implements Insertable<Document> {
           ..write('sizeBytes: $sizeBytes, ')
           ..write('chunkCount: $chunkCount, ')
           ..write('mimeType: $mimeType, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('status: $status, ')
+          ..write('progress: $progress, ')
+          ..write('errorMessage: $errorMessage')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, name, path, sizeBytes, chunkCount, mimeType, createdAt);
+  int get hashCode => Object.hash(id, name, path, sizeBytes, chunkCount,
+      mimeType, createdAt, sessionId, status, progress, errorMessage);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -845,7 +1015,11 @@ class Document extends DataClass implements Insertable<Document> {
           other.sizeBytes == this.sizeBytes &&
           other.chunkCount == this.chunkCount &&
           other.mimeType == this.mimeType &&
-          other.createdAt == this.createdAt);
+          other.createdAt == this.createdAt &&
+          other.sessionId == this.sessionId &&
+          other.status == this.status &&
+          other.progress == this.progress &&
+          other.errorMessage == this.errorMessage);
 }
 
 class DocumentsCompanion extends UpdateCompanion<Document> {
@@ -856,6 +1030,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
   final Value<int> chunkCount;
   final Value<String> mimeType;
   final Value<DateTime> createdAt;
+  final Value<String?> sessionId;
+  final Value<int> status;
+  final Value<double> progress;
+  final Value<String?> errorMessage;
   final Value<int> rowid;
   const DocumentsCompanion({
     this.id = const Value.absent(),
@@ -865,6 +1043,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     this.chunkCount = const Value.absent(),
     this.mimeType = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.sessionId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.progress = const Value.absent(),
+    this.errorMessage = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DocumentsCompanion.insert({
@@ -875,6 +1057,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     this.chunkCount = const Value.absent(),
     required String mimeType,
     required DateTime createdAt,
+    this.sessionId = const Value.absent(),
+    this.status = const Value.absent(),
+    this.progress = const Value.absent(),
+    this.errorMessage = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name),
@@ -890,6 +1076,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     Expression<int>? chunkCount,
     Expression<String>? mimeType,
     Expression<DateTime>? createdAt,
+    Expression<String>? sessionId,
+    Expression<int>? status,
+    Expression<double>? progress,
+    Expression<String>? errorMessage,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -900,6 +1090,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       if (chunkCount != null) 'chunk_count': chunkCount,
       if (mimeType != null) 'mime_type': mimeType,
       if (createdAt != null) 'created_at': createdAt,
+      if (sessionId != null) 'session_id': sessionId,
+      if (status != null) 'status': status,
+      if (progress != null) 'progress': progress,
+      if (errorMessage != null) 'error_message': errorMessage,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -912,6 +1106,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       Value<int>? chunkCount,
       Value<String>? mimeType,
       Value<DateTime>? createdAt,
+      Value<String?>? sessionId,
+      Value<int>? status,
+      Value<double>? progress,
+      Value<String?>? errorMessage,
       Value<int>? rowid}) {
     return DocumentsCompanion(
       id: id ?? this.id,
@@ -921,6 +1119,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       chunkCount: chunkCount ?? this.chunkCount,
       mimeType: mimeType ?? this.mimeType,
       createdAt: createdAt ?? this.createdAt,
+      sessionId: sessionId ?? this.sessionId,
+      status: status ?? this.status,
+      progress: progress ?? this.progress,
+      errorMessage: errorMessage ?? this.errorMessage,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -949,6 +1151,18 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<int>(status.value);
+    }
+    if (progress.present) {
+      map['progress'] = Variable<double>(progress.value);
+    }
+    if (errorMessage.present) {
+      map['error_message'] = Variable<String>(errorMessage.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -965,6 +1179,10 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
           ..write('chunkCount: $chunkCount, ')
           ..write('mimeType: $mimeType, ')
           ..write('createdAt: $createdAt, ')
+          ..write('sessionId: $sessionId, ')
+          ..write('status: $status, ')
+          ..write('progress: $progress, ')
+          ..write('errorMessage: $errorMessage, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2311,6 +2529,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules(
         [
           WritePropagation(
+            on: TableUpdateQuery.onTableName('sessions',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('documents', kind: UpdateKind.delete),
+            ],
+          ),
+          WritePropagation(
             on: TableUpdateQuery.onTableName('documents',
                 limitUpdateKind: UpdateKind.delete),
             result: [
@@ -2347,6 +2572,7 @@ typedef $$SessionsTableCreateCompanionBuilder = SessionsCompanion Function({
   required String title,
   required DateTime createdAt,
   required DateTime updatedAt,
+  Value<int> knowledgeScope,
   Value<int> rowid,
 });
 typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
@@ -2354,6 +2580,7 @@ typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
   Value<String> title,
   Value<DateTime> createdAt,
   Value<DateTime> updatedAt,
+  Value<int> knowledgeScope,
   Value<int> rowid,
 });
 
@@ -2372,6 +2599,21 @@ final class $$SessionsTableReferences
         .filter((f) => f.sessionId.id.sqlEquals($_itemColumn<String>('id')!));
 
     final cache = $_typedResult.readTableOrNull(_messagesRefsTable($_db));
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: cache));
+  }
+
+  static MultiTypedResultKey<$DocumentsTable, List<Document>>
+      _documentsRefsTable(_$AppDatabase db) =>
+          MultiTypedResultKey.fromTable(db.documents,
+              aliasName:
+                  $_aliasNameGenerator(db.sessions.id, db.documents.sessionId));
+
+  $$DocumentsTableProcessedTableManager get documentsRefs {
+    final manager = $$DocumentsTableTableManager($_db, $_db.documents)
+        .filter((f) => f.sessionId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_documentsRefsTable($_db));
     return ProcessedTableManager(
         manager.$state.copyWith(prefetchedData: cache));
   }
@@ -2413,6 +2655,10 @@ class $$SessionsTableFilterComposer
   ColumnFilters<DateTime> get updatedAt => $composableBuilder(
       column: $table.updatedAt, builder: (column) => ColumnFilters(column));
 
+  ColumnFilters<int> get knowledgeScope => $composableBuilder(
+      column: $table.knowledgeScope,
+      builder: (column) => ColumnFilters(column));
+
   Expression<bool> messagesRefs(
       Expression<bool> Function($$MessagesTableFilterComposer f) f) {
     final $$MessagesTableFilterComposer composer = $composerBuilder(
@@ -2426,6 +2672,27 @@ class $$SessionsTableFilterComposer
             $$MessagesTableFilterComposer(
               $db: $db,
               $table: $db.messages,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
+
+  Expression<bool> documentsRefs(
+      Expression<bool> Function($$DocumentsTableFilterComposer f) f) {
+    final $$DocumentsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.documents,
+        getReferencedColumn: (t) => t.sessionId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$DocumentsTableFilterComposer(
+              $db: $db,
+              $table: $db.documents,
               $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
               joinBuilder: joinBuilder,
               $removeJoinBuilderFromRootComposer:
@@ -2476,6 +2743,10 @@ class $$SessionsTableOrderingComposer
 
   ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
       column: $table.updatedAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get knowledgeScope => $composableBuilder(
+      column: $table.knowledgeScope,
+      builder: (column) => ColumnOrderings(column));
 }
 
 class $$SessionsTableAnnotationComposer
@@ -2499,6 +2770,9 @@ class $$SessionsTableAnnotationComposer
   GeneratedColumn<DateTime> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
 
+  GeneratedColumn<int> get knowledgeScope => $composableBuilder(
+      column: $table.knowledgeScope, builder: (column) => column);
+
   Expression<T> messagesRefs<T extends Object>(
       Expression<T> Function($$MessagesTableAnnotationComposer a) f) {
     final $$MessagesTableAnnotationComposer composer = $composerBuilder(
@@ -2512,6 +2786,27 @@ class $$SessionsTableAnnotationComposer
             $$MessagesTableAnnotationComposer(
               $db: $db,
               $table: $db.messages,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
+
+  Expression<T> documentsRefs<T extends Object>(
+      Expression<T> Function($$DocumentsTableAnnotationComposer a) f) {
+    final $$DocumentsTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.documents,
+        getReferencedColumn: (t) => t.sessionId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$DocumentsTableAnnotationComposer(
+              $db: $db,
+              $table: $db.documents,
               $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
               joinBuilder: joinBuilder,
               $removeJoinBuilderFromRootComposer:
@@ -2553,7 +2848,8 @@ class $$SessionsTableTableManager extends RootTableManager<
     $$SessionsTableUpdateCompanionBuilder,
     (Session, $$SessionsTableReferences),
     Session,
-    PrefetchHooks Function({bool messagesRefs, bool sessionMemoryRefs})> {
+    PrefetchHooks Function(
+        {bool messagesRefs, bool documentsRefs, bool sessionMemoryRefs})> {
   $$SessionsTableTableManager(_$AppDatabase db, $SessionsTable table)
       : super(TableManagerState(
           db: db,
@@ -2569,6 +2865,7 @@ class $$SessionsTableTableManager extends RootTableManager<
             Value<String> title = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
             Value<DateTime> updatedAt = const Value.absent(),
+            Value<int> knowledgeScope = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               SessionsCompanion(
@@ -2576,6 +2873,7 @@ class $$SessionsTableTableManager extends RootTableManager<
             title: title,
             createdAt: createdAt,
             updatedAt: updatedAt,
+            knowledgeScope: knowledgeScope,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -2583,6 +2881,7 @@ class $$SessionsTableTableManager extends RootTableManager<
             required String title,
             required DateTime createdAt,
             required DateTime updatedAt,
+            Value<int> knowledgeScope = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               SessionsCompanion.insert(
@@ -2590,6 +2889,7 @@ class $$SessionsTableTableManager extends RootTableManager<
             title: title,
             createdAt: createdAt,
             updatedAt: updatedAt,
+            knowledgeScope: knowledgeScope,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -2597,11 +2897,14 @@ class $$SessionsTableTableManager extends RootTableManager<
                   (e.readTable(table), $$SessionsTableReferences(db, table, e)))
               .toList(),
           prefetchHooksCallback: (
-              {messagesRefs = false, sessionMemoryRefs = false}) {
+              {messagesRefs = false,
+              documentsRefs = false,
+              sessionMemoryRefs = false}) {
             return PrefetchHooks(
               db: db,
               explicitlyWatchedTables: [
                 if (messagesRefs) db.messages,
+                if (documentsRefs) db.documents,
                 if (sessionMemoryRefs) db.sessionMemory
               ],
               addJoins: null,
@@ -2615,6 +2918,19 @@ class $$SessionsTableTableManager extends RootTableManager<
                         managerFromTypedResult: (p0) =>
                             $$SessionsTableReferences(db, table, p0)
                                 .messagesRefs,
+                        referencedItemsForCurrentItem:
+                            (item, referencedItems) => referencedItems
+                                .where((e) => e.sessionId == item.id),
+                        typedResults: items),
+                  if (documentsRefs)
+                    await $_getPrefetchedData<Session, $SessionsTable,
+                            Document>(
+                        currentTable: table,
+                        referencedTable:
+                            $$SessionsTableReferences._documentsRefsTable(db),
+                        managerFromTypedResult: (p0) =>
+                            $$SessionsTableReferences(db, table, p0)
+                                .documentsRefs,
                         referencedItemsForCurrentItem:
                             (item, referencedItems) => referencedItems
                                 .where((e) => e.sessionId == item.id),
@@ -2650,7 +2966,8 @@ typedef $$SessionsTableProcessedTableManager = ProcessedTableManager<
     $$SessionsTableUpdateCompanionBuilder,
     (Session, $$SessionsTableReferences),
     Session,
-    PrefetchHooks Function({bool messagesRefs, bool sessionMemoryRefs})>;
+    PrefetchHooks Function(
+        {bool messagesRefs, bool documentsRefs, bool sessionMemoryRefs})>;
 typedef $$MessagesTableCreateCompanionBuilder = MessagesCompanion Function({
   required String id,
   required String sessionId,
@@ -2931,6 +3248,10 @@ typedef $$DocumentsTableCreateCompanionBuilder = DocumentsCompanion Function({
   Value<int> chunkCount,
   required String mimeType,
   required DateTime createdAt,
+  Value<String?> sessionId,
+  Value<int> status,
+  Value<double> progress,
+  Value<String?> errorMessage,
   Value<int> rowid,
 });
 typedef $$DocumentsTableUpdateCompanionBuilder = DocumentsCompanion Function({
@@ -2941,12 +3262,31 @@ typedef $$DocumentsTableUpdateCompanionBuilder = DocumentsCompanion Function({
   Value<int> chunkCount,
   Value<String> mimeType,
   Value<DateTime> createdAt,
+  Value<String?> sessionId,
+  Value<int> status,
+  Value<double> progress,
+  Value<String?> errorMessage,
   Value<int> rowid,
 });
 
 final class $$DocumentsTableReferences
     extends BaseReferences<_$AppDatabase, $DocumentsTable, Document> {
   $$DocumentsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $SessionsTable _sessionIdTable(_$AppDatabase db) =>
+      db.sessions.createAlias(
+          $_aliasNameGenerator(db.documents.sessionId, db.sessions.id));
+
+  $$SessionsTableProcessedTableManager? get sessionId {
+    final $_column = $_itemColumn<String>('session_id');
+    if ($_column == null) return null;
+    final manager = $$SessionsTableTableManager($_db, $_db.sessions)
+        .filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_sessionIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: [item]));
+  }
 
   static MultiTypedResultKey<$ChunksTable, List<Chunk>> _chunksRefsTable(
           _$AppDatabase db) =>
@@ -2993,6 +3333,35 @@ class $$DocumentsTableFilterComposer
 
   ColumnFilters<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get status => $composableBuilder(
+      column: $table.status, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<double> get progress => $composableBuilder(
+      column: $table.progress, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get errorMessage => $composableBuilder(
+      column: $table.errorMessage, builder: (column) => ColumnFilters(column));
+
+  $$SessionsTableFilterComposer get sessionId {
+    final $$SessionsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableFilterComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
 
   Expression<bool> chunksRefs(
       Expression<bool> Function($$ChunksTableFilterComposer f) f) {
@@ -3045,6 +3414,36 @@ class $$DocumentsTableOrderingComposer
 
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get status => $composableBuilder(
+      column: $table.status, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<double> get progress => $composableBuilder(
+      column: $table.progress, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get errorMessage => $composableBuilder(
+      column: $table.errorMessage,
+      builder: (column) => ColumnOrderings(column));
+
+  $$SessionsTableOrderingComposer get sessionId {
+    final $$SessionsTableOrderingComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableOrderingComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
 }
 
 class $$DocumentsTableAnnotationComposer
@@ -3076,6 +3475,35 @@ class $$DocumentsTableAnnotationComposer
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<int> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<double> get progress =>
+      $composableBuilder(column: $table.progress, builder: (column) => column);
+
+  GeneratedColumn<String> get errorMessage => $composableBuilder(
+      column: $table.errorMessage, builder: (column) => column);
+
+  $$SessionsTableAnnotationComposer get sessionId {
+    final $$SessionsTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableAnnotationComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
 
   Expression<T> chunksRefs<T extends Object>(
       Expression<T> Function($$ChunksTableAnnotationComposer a) f) {
@@ -3110,7 +3538,7 @@ class $$DocumentsTableTableManager extends RootTableManager<
     $$DocumentsTableUpdateCompanionBuilder,
     (Document, $$DocumentsTableReferences),
     Document,
-    PrefetchHooks Function({bool chunksRefs})> {
+    PrefetchHooks Function({bool sessionId, bool chunksRefs})> {
   $$DocumentsTableTableManager(_$AppDatabase db, $DocumentsTable table)
       : super(TableManagerState(
           db: db,
@@ -3129,6 +3557,10 @@ class $$DocumentsTableTableManager extends RootTableManager<
             Value<int> chunkCount = const Value.absent(),
             Value<String> mimeType = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
+            Value<String?> sessionId = const Value.absent(),
+            Value<int> status = const Value.absent(),
+            Value<double> progress = const Value.absent(),
+            Value<String?> errorMessage = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DocumentsCompanion(
@@ -3139,6 +3571,10 @@ class $$DocumentsTableTableManager extends RootTableManager<
             chunkCount: chunkCount,
             mimeType: mimeType,
             createdAt: createdAt,
+            sessionId: sessionId,
+            status: status,
+            progress: progress,
+            errorMessage: errorMessage,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3149,6 +3585,10 @@ class $$DocumentsTableTableManager extends RootTableManager<
             Value<int> chunkCount = const Value.absent(),
             required String mimeType,
             required DateTime createdAt,
+            Value<String?> sessionId = const Value.absent(),
+            Value<int> status = const Value.absent(),
+            Value<double> progress = const Value.absent(),
+            Value<String?> errorMessage = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DocumentsCompanion.insert(
@@ -3159,6 +3599,10 @@ class $$DocumentsTableTableManager extends RootTableManager<
             chunkCount: chunkCount,
             mimeType: mimeType,
             createdAt: createdAt,
+            sessionId: sessionId,
+            status: status,
+            progress: progress,
+            errorMessage: errorMessage,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3167,11 +3611,36 @@ class $$DocumentsTableTableManager extends RootTableManager<
                     $$DocumentsTableReferences(db, table, e)
                   ))
               .toList(),
-          prefetchHooksCallback: ({chunksRefs = false}) {
+          prefetchHooksCallback: ({sessionId = false, chunksRefs = false}) {
             return PrefetchHooks(
               db: db,
               explicitlyWatchedTables: [if (chunksRefs) db.chunks],
-              addJoins: null,
+              addJoins: <
+                  T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic>>(state) {
+                if (sessionId) {
+                  state = state.withJoin(
+                    currentTable: table,
+                    currentColumn: table.sessionId,
+                    referencedTable:
+                        $$DocumentsTableReferences._sessionIdTable(db),
+                    referencedColumn:
+                        $$DocumentsTableReferences._sessionIdTable(db).id,
+                  ) as T;
+                }
+
+                return state;
+              },
               getPrefetchedDataCallback: (items) async {
                 return [
                   if (chunksRefs)
@@ -3204,7 +3673,7 @@ typedef $$DocumentsTableProcessedTableManager = ProcessedTableManager<
     $$DocumentsTableUpdateCompanionBuilder,
     (Document, $$DocumentsTableReferences),
     Document,
-    PrefetchHooks Function({bool chunksRefs})>;
+    PrefetchHooks Function({bool sessionId, bool chunksRefs})>;
 typedef $$ChunksTableCreateCompanionBuilder = ChunksCompanion Function({
   required String id,
   required String documentId,
@@ -4326,6 +4795,7 @@ class MessagesDaoManager {
 }
 
 mixin _$DocumentsDaoMixin on DatabaseAccessor<AppDatabase> {
+  $SessionsTable get sessions => attachedDatabase.sessions;
   $DocumentsTable get documents => attachedDatabase.documents;
   DocumentsDaoManager get managers => DocumentsDaoManager(this);
 }
@@ -4333,11 +4803,14 @@ mixin _$DocumentsDaoMixin on DatabaseAccessor<AppDatabase> {
 class DocumentsDaoManager {
   final _$DocumentsDaoMixin _db;
   DocumentsDaoManager(this._db);
+  $$SessionsTableTableManager get sessions =>
+      $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
   $$DocumentsTableTableManager get documents =>
       $$DocumentsTableTableManager(_db.attachedDatabase, _db.documents);
 }
 
 mixin _$ChunksDaoMixin on DatabaseAccessor<AppDatabase> {
+  $SessionsTable get sessions => attachedDatabase.sessions;
   $DocumentsTable get documents => attachedDatabase.documents;
   $ChunksTable get chunks => attachedDatabase.chunks;
   ChunksDaoManager get managers => ChunksDaoManager(this);
@@ -4346,6 +4819,8 @@ mixin _$ChunksDaoMixin on DatabaseAccessor<AppDatabase> {
 class ChunksDaoManager {
   final _$ChunksDaoMixin _db;
   ChunksDaoManager(this._db);
+  $$SessionsTableTableManager get sessions =>
+      $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
   $$DocumentsTableTableManager get documents =>
       $$DocumentsTableTableManager(_db.attachedDatabase, _db.documents);
   $$ChunksTableTableManager get chunks =>
@@ -4353,6 +4828,7 @@ class ChunksDaoManager {
 }
 
 mixin _$VectorsDaoMixin on DatabaseAccessor<AppDatabase> {
+  $SessionsTable get sessions => attachedDatabase.sessions;
   $DocumentsTable get documents => attachedDatabase.documents;
   $ChunksTable get chunks => attachedDatabase.chunks;
   $VectorsTable get vectors => attachedDatabase.vectors;
@@ -4362,6 +4838,8 @@ mixin _$VectorsDaoMixin on DatabaseAccessor<AppDatabase> {
 class VectorsDaoManager {
   final _$VectorsDaoMixin _db;
   VectorsDaoManager(this._db);
+  $$SessionsTableTableManager get sessions =>
+      $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
   $$DocumentsTableTableManager get documents =>
       $$DocumentsTableTableManager(_db.attachedDatabase, _db.documents);
   $$ChunksTableTableManager get chunks =>

@@ -57,6 +57,7 @@ Future<void> setupLocator() async {
   // RAG service
   sl.registerLazySingleton<RagService>(
     () => RagServiceImpl(
+      db: sl<AppDatabase>(),
       geckoService: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
     ),

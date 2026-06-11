@@ -17,10 +17,14 @@ abstract interface class VectorStoreService {
 
   /// Tìm top-K chunks gần nhất với queryVector
   /// Chỉ trả về kết quả có score >= threshold
+  ///
+  /// [allowedDocumentIds] — nếu != null, chỉ search trong các document này.
+  /// Filter trước ranking (2-step: preTopK candidates → re-rank → topK).
   Future<List<SearchResult>> search({
     required List<double> queryVector,
     int topK = 5,
     double threshold = 0.7,
+    Set<String>? allowedDocumentIds,
   });
 
   /// Xóa vectors theo danh sách chunk IDs
@@ -54,6 +58,10 @@ class SearchResult {
 /// Suitable for up to ~50,000 chunks.
 class VectorStoreServiceImpl implements VectorStoreService {
   final AppDatabase _db;
+
+  /// Pre-topK candidates lấy lên trước khi re-rank thành topK cuối.
+  /// Với < 50k vectors, pre-topK = 200 đủ an toàn.
+  static const int _preTopK = 200;
 
   VectorStoreServiceImpl(this._db);
 
@@ -108,14 +116,27 @@ class VectorStoreServiceImpl implements VectorStoreService {
     required List<double> queryVector,
     int topK = 5,
     double threshold = 0.7,
+    Set<String>? allowedDocumentIds,
   }) async {
     try {
+      // ─── Step 1: Lấy tất cả vectors ──────────────────────────────────
       final allVectors = await _db.vectorsDao.getAllVectors();
       if (allVectors.isEmpty) return [];
 
-      // Calculate cosine similarity for all vectors
+      // ─── Step 2: Filter candidates theo allowedDocumentIds ──────────
+      // Filter trước ranking, không filter sau topK (fix bug logic)
+      var candidates = allVectors;
+      if (allowedDocumentIds != null && allowedDocumentIds.isNotEmpty) {
+        final chunkIdsInScope =
+            await _db.chunksDao.getChunkIdsByDocumentIds(allowedDocumentIds);
+        final chunkIdSet = chunkIdsInScope.toSet();
+        candidates =
+            allVectors.where((v) => chunkIdSet.contains(v.chunkId)).toList();
+      }
+
+      // ─── Step 3: Tính cosine similarity → preTopK ──────────────────
       final scored = <_ScoredResult>[];
-      for (final v in allVectors) {
+      for (final v in candidates) {
         final embedding = EmbeddingSerializer.deserialize(v.embedding);
         if (embedding.length != queryVector.length) continue;
 
@@ -125,11 +146,13 @@ class VectorStoreServiceImpl implements VectorStoreService {
         }
       }
 
-      // Sort by score descending
+      // Sort score desc, lấy preTopK
       scored.sort((a, b) => b.score.compareTo(a.score));
-      final topResults = scored.take(topK).toList();
+      final preTopResults = scored.take(_preTopK).toList();
+      if (preTopResults.isEmpty) return [];
 
-      if (topResults.isEmpty) return [];
+      // ─── Step 4: Re-rank → topK ────────────────────────────────────
+      final topResults = preTopResults.take(topK).toList();
 
       // Fetch chunk texts
       final chunkIds = topResults.map((r) => r.chunkId).toList();

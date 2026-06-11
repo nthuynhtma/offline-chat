@@ -122,6 +122,82 @@ _MessageListState:
 
 ---
 
+## Knowledge Management
+
+### Session-specific + Global Knowledge
+Ứng dụng hỗ trợ 2 cấp độ knowledge:
+
+- **Global KB** — Tài liệu dùng chung cho mọi session (`sessionId = null`)
+- **Session KB** — Tài liệu upload trong từng chat (`sessionId = abc123`)
+
+```
+documents — thêm:
+  ├── sessionId (nullable, FK→sessions.id ON DELETE CASCADE)
+  ├── status (enum IndexStatus: pending=0, processing=1, completed=2, failed=3)
+  ├── progress (real 0.0→1.0)
+  └── errorMessage (nullable)
+
+sessions — thêm:
+  └── knowledgeScope (int: 0=sessionOnly, 1=globalOnly, 2=globalAndSession)
+```
+
+### KnowledgeScope enum (lib/core/constants/document_constants.dart)
+```dart
+enum KnowledgeScope {
+  sessionOnly,        // Chỉ file upload trong session này
+  globalOnly,         // Chỉ Global KB
+  globalAndSession,   // Cả hai (default)
+}
+```
+
+Lưu theo conversation, persist qua session — không mất khi restart app.
+
+### RAG Filter Architecture (2-step: filter trước ranking)
+```
+Search:
+  1. Xác định allowedDocumentIds theo KnowledgeScope
+     - sessionOnly: WHERE sessionId = currentSessionId
+     - globalOnly: WHERE sessionId IS NULL
+     - globalAndSession: WHERE sessionId IS NULL OR sessionId = currentSessionId
+  2. Pre-topK (200 candidates) → cosine similarity
+  3. Re-rank → topK (20)
+```
+
+**Fix logic:** Filter trước ranking, không filter sau topK (tránh mất kết quả hợp lệ).
+
+### Indexing Pipeline (non-blocking, queue tuần tự)
+```
+Upload file
+  → Create document record (status=pending)
+  → unawaited(_processFile()):
+      1. Parse (step 1/3) → update progress
+      2. Chunk (step 2/3) → update progress
+      3. Embed (step 3/3) → update progress, status=completed
+  → UI badge: [Processing... 45%] → [Ready]
+```
+
+### Cascade Delete
+```
+Delete Session
+  → Sessions ON DELETE CASCADE
+    → Documents (sessionId)
+      → Chunks (documentId, đã cascade)
+        → Vectors (xoá thủ công qua DAO)
+```
+
+### Key files:
+- `lib/core/constants/document_constants.dart` — Enums (KnowledgeScope, IndexStatus, DocumentScope)
+- `lib/database/tables/documents_table.dart` — Schema (sessionId, status, progress, errorMessage)
+- `lib/database/tables/sessions_table.dart` — Schema (knowledgeScope)
+- `lib/database/daos/documents_dao.dart` — Queries: getDocumentsBySessionId, getDocumentIdsByScope, updateDocumentProgress
+- `lib/services/rag/rag_service.dart` — retrieve(scope, sessionId)
+- `lib/services/rag/rag_service_impl.dart` — Scope-based document filter
+- `lib/services/vectorstore/vector_store_service.dart` — 2-step search: filter→preTopK→re-rank
+- `lib/features/chat/bloc/chat_bloc.dart` — KnowledgeScopeChanged event, load scope từ session
+- `lib/features/session/models/session_model.dart` — knowledgeScope field
+
+---
+
 ## Các Service Chính
 
 ### GemmaService (flutter_gemma 0.16.4)
@@ -244,6 +320,8 @@ abstract interface class RagService {
   Future<RagContext> retrieve({
     required String query,
     required int tokenBudget,
+    required KnowledgeScope scope,    // MỚI: scope filter
+    String? sessionId,                // MỚI: session-specific docs
   });
 }
 
@@ -255,10 +333,15 @@ RagContext:
 
 RagServiceImpl:
   1. Embed query → GeckoService
-  2. Vector search → VectorStoreService (topK: 20, threshold: 0.7)
-  3. Chunk-level trim → break khi vượt tokenBudget
-  4. Log RagTelemetry
-  5. Return RagContext
+  2. Filter document IDs theo KnowledgeScope (filter trước ranking)
+  3. Vector search → VectorStoreService (topK: 20, threshold: 0.7, allowedDocumentIds)
+  4. Chunk-level trim → break khi vượt tokenBudget
+  5. Log RagTelemetry
+  6. Return RagContext
+
+VectorStoreService 2-step search:
+  - Step 1: Filter candidates bằng allowedDocumentIds (WHERE documentId IN ...)
+  - Step 2: Pre-topK (200) → cosine similarity → re-rank → topK (20)
 
 Graceful degradation: nếu Gecko chưa ready hoặc search lỗi → RagContext rỗng
 ```

@@ -1,6 +1,8 @@
+import 'package:offline_chat/core/constants/document_constants.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/rag/rag_context.dart';
 import 'package:offline_chat/services/rag/rag_service.dart';
@@ -16,6 +18,7 @@ import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 /// 4. Log telemetry
 /// 5. Return RagContext
 class RagServiceImpl implements RagService {
+  final AppDatabase _db;
   final GeckoService _geckoService;
   final VectorStoreService _vectorStore;
 
@@ -26,15 +29,19 @@ class RagServiceImpl implements RagService {
   static const double _threshold = 0.7;
 
   RagServiceImpl({
+    required AppDatabase db,
     required GeckoService geckoService,
     required VectorStoreService vectorStore,
-  })  : _geckoService = geckoService,
+  })  : _db = db,
+        _geckoService = geckoService,
         _vectorStore = vectorStore;
 
   @override
   Future<RagContext> retrieve({
     required String query,
     required int tokenBudget,
+    required KnowledgeScope scope,
+    String? sessionId,
   }) async {
     final stopwatch = Stopwatch()..start();
 
@@ -58,13 +65,46 @@ class RagServiceImpl implements RagService {
     }
     final embedTime = stopwatch.elapsedMilliseconds;
 
-    // 2. Vector search
+    // 2. Xác định document IDs theo scope (filter trước ranking)
+    Set<String>? allowedDocIds;
+    try {
+      if (scope == KnowledgeScope.sessionOnly && sessionId != null) {
+        // Session documents only
+        final docs = await _db.documentsDao.getDocumentsBySessionId(sessionId);
+        allowedDocIds = docs.map((d) => d.id).toSet();
+      } else if (scope == KnowledgeScope.globalOnly) {
+        // Global documents only
+        final docs = await _db.documentsDao.getDocumentsBySessionId(null);
+        allowedDocIds = docs.map((d) => d.id).toSet();
+      } else if (scope == KnowledgeScope.globalAndSession) {
+        // Global + session documents
+        final globalDocs = await _db.documentsDao.getDocumentsBySessionId(null);
+        final sessionDocs = sessionId != null
+            ? await _db.documentsDao.getDocumentsBySessionId(sessionId)
+            : <Document>[];
+        allowedDocIds = {
+          ...globalDocs.map((d) => d.id),
+          ...sessionDocs.map((d) => d.id),
+        };
+      }
+      // Nếu không có documents nào trong scope → skip RAG
+      if (allowedDocIds != null && allowedDocIds.isEmpty) {
+        log_util.log.i('🔍 [RagService] Không có documents trong scope ($scope) — skip RAG');
+        return RagContext(chunks: [], tokenCount: 0);
+      }
+    } catch (e) {
+      log_util.log.w('⚠️ [RagService] Lỗi khi get document IDs theo scope: $e — graceful degradation');
+      return RagContext(chunks: [], tokenCount: 0);
+    }
+
+    // 3. Vector search với allowedDocumentIds
     List<SearchResult> results;
     try {
       results = await _vectorStore.search(
         queryVector: queryVector,
         topK: _topK,
         threshold: _threshold,
+        allowedDocumentIds: allowedDocIds,
       );
     } catch (e) {
       log_util.log.w('⚠️ [RagService] Lỗi vector search: $e — graceful degradation');

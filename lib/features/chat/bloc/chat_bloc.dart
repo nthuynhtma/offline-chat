@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
+import 'package:offline_chat/core/constants/document_constants.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:offline_chat/core/errors/app_exception.dart';
 import 'package:offline_chat/database/tables/messages_table.dart';
@@ -19,6 +20,19 @@ import 'package:offline_chat/services/memory_store/summary_service.dart';
 import 'package:offline_chat/services/memory_store/memory_prompt_formatter.dart';
 import 'package:offline_chat/services/rag/rag_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
+
+// ─── States ──────────────────────────────────────────────────────────────────
+
+/// Extension property để ChatState có thể get knowledgeScope
+extension ChatStateScopeX on ChatState {
+  KnowledgeScope get knowledgeScope =>
+      this is ChatScopeProvider ? (this as ChatScopeProvider).knowledgeScope
+      : KnowledgeScope.globalAndSession;
+}
+
+abstract class ChatScopeProvider {
+  KnowledgeScope get knowledgeScope;
+}
 
 // Events
 sealed class ChatEvent extends Equatable {
@@ -56,6 +70,15 @@ class MessagesCleared extends ChatEvent {
 /// Cho phép ChatBloc clear error "needsModelDownload" và chuyển về loaded.
 class ModelBecameReady extends ChatEvent {
   const ModelBecameReady();
+}
+
+/// Chuyển đổi KnowledgeScope cho session hiện tại.
+class KnowledgeScopeChanged extends ChatEvent {
+  final KnowledgeScope scope;
+  const KnowledgeScopeChanged(this.scope);
+
+  @override
+  List<Object?> get props => [scope];
 }
 
 // States
@@ -361,9 +384,15 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         'total=${historyTokenSum + reservedResponse + reservedSystem + questionTokens + ragBudget.clamp(0, kGemmaMaxTokens)}',
       );
 
+      // Load KnowledgeScope từ session
+      final sessionInfo = await _sessionRepo.getSessionById(_currentSessionId!);
+      final scope = sessionInfo?.knowledgeScope ?? KnowledgeScope.globalAndSession;
+
       final ragContext = await _ragService.retrieve(
         query: event.content,
         tokenBudget: ragBudget.clamp(0, kGemmaMaxTokens),
+        scope: scope,
+        sessionId: _currentSessionId,
       );
 
       // 3. Build prompt via PromptBuilder
