@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_gemma/flutter_gemma.dart';
 
 import 'package:offline_chat/core/errors/app_exception.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
 abstract interface class GeckoService {
   /// Đăng ký model + tokenizer với flutter_gemma.
@@ -51,26 +52,38 @@ class GeckoServiceImpl implements GeckoService {
     required String modelPath,
     required String tokenizerPath,
   }) async {
-    if (_registered) return;
+    if (_registered) {
+      log_util.log.d('[Gecko] registerModel: already registered — skip');
+      return;
+    }
 
+    log_util.log.i('[Gecko] registerModel: model=$modelPath, tokenizer=$tokenizerPath');
     try {
       await FlutterGemma.installEmbedder()
           .modelFromFile(modelPath)
           .tokenizerFromFile(tokenizerPath)
           .install();
       _registered = true;
+      log_util.log.i('[Gecko] registerModel: ✅ success');
     } catch (e) {
+      log_util.log.e('[Gecko] registerModel: ❌ failed — $e');
       throw EmbeddingException('Failed to register embedding model: $e');
     }
   }
 
   @override
   Future<void> initialize() async {
-    if (_embeddingModel != null) return;
+    if (_embeddingModel != null) {
+      log_util.log.d('[Gecko] initialize: already initialized — skip');
+      return;
+    }
 
+    log_util.log.i('[Gecko] initialize: calling FlutterGemma.getActiveEmbedder()...');
     try {
       _embeddingModel = await FlutterGemma.getActiveEmbedder();
+      log_util.log.i('[Gecko] initialize: ✅ success — _embeddingModel != null');
     } catch (e) {
+      log_util.log.e('[Gecko] initialize: ❌ failed — $e');
       throw EmbeddingException('Failed to initialize embedding model: $e');
     }
   }

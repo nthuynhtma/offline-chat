@@ -80,16 +80,6 @@ Future<void> setupLocator() async {
   sl.registerLazySingleton<MessageRepository>(
     () => MessageRepositoryImpl(database.messagesDao),
   );
-  sl.registerLazySingleton<DocumentRepository>(
-    () => DocumentRepositoryImpl(
-      sl<AppDatabase>(),
-      sl<DocumentParserService>(),
-      sl<ChunkingService>(),
-      sl<VectorStoreService>(),
-      sl<GeckoService>(),
-    ),
-  );
-
   // ─── Context Manager (Deprecated) ──────────────────────────────────────────
   sl.registerLazySingleton<ContextManagerService>(
     () => ContextManagerService(
@@ -138,7 +128,10 @@ Future<void> setupLocator() async {
   );
 
   sl.registerLazySingleton<KnowledgeBloc>(
-    () => KnowledgeBloc(sl<DocumentRepository>()),
+    () => KnowledgeBloc(
+      sl<DocumentRepository>(),
+      sl<DocumentUploadQueue>(),
+    ),
   );
 
   // ─── Upload Queue ──────────────────────────────────────────────────────────
@@ -151,6 +144,13 @@ Future<void> setupLocator() async {
       chunker: sl<ChunkingService>(),
       gecko: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
+    ),
+  );
+
+  sl.registerLazySingleton<DocumentRepository>(
+    () => DocumentRepositoryImpl(
+      sl<AppDatabase>(),
+      sl<DocumentUploadQueue>(),
     ),
   );
 

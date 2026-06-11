@@ -6,6 +6,7 @@ import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/gemma/gemma_service.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
 // ─── Internal event ──────────────────────────────────────────────────────────
 
@@ -162,6 +163,8 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     if (_isCheckingStatus) return; // Guard chống gọi đồng thời
     _isCheckingStatus = true;
     emit(const ModelLoading());
+
+    log_util.log.i('[ModelBloc] _onStatusChecked: bắt đầu kiểm tra trạng thái model');
     try {
       await _modelManager.initialize();
       _listenToProgress();
@@ -171,24 +174,46 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       final geckoDownloaded =
           _modelManager.geckoInfo.status == ModelStatus.downloaded;
 
+      log_util.log.i('[ModelBloc] Status: gemmaDownloaded=$gemmaDownloaded, geckoDownloaded=$geckoDownloaded');
+      log_util.log.i('[ModelBloc] Status: gemmaInfo.status=${_modelManager.gemmaInfo.status}, geckoInfo.status=${_modelManager.geckoInfo.status}');
+
       bool gemmaReady = _gemmaService.isReady;
       bool geckoReady = _geckoService.isReady;
+      log_util.log.i('[ModelBloc] Before init: gemmaReady=$gemmaReady, geckoReady=$geckoReady');
 
       // Idempotent: chỉ init Gemma nếu chưa ready và đã download
       if (gemmaDownloaded && !gemmaReady) {
         _gemmaInitCompleter = Completer<bool>();
+        log_util.log.i('[ModelBloc] → Gemma downloaded nhưng chưa ready — gọi _tryInitializeGemma()...');
         gemmaReady = await _tryInitializeGemma();
         _gemmaInitCompleter!.complete(gemmaReady);
+        log_util.log.i('[ModelBloc] _tryInitializeGemma() → gemmaReady=$gemmaReady');
+      } else if (!gemmaDownloaded) {
+        log_util.log.i('[ModelBloc] → Gemma chưa download — skip init');
+      } else {
+        log_util.log.i('[ModelBloc] → Gemma đã ready — skip init');
       }
 
       // Idempotent: chỉ init Gecko nếu chưa ready và đã download
       if (geckoDownloaded && !geckoReady) {
+        log_util.log.i('[ModelBloc] → Gecko downloaded nhưng chưa ready — kiểm tra tokenizer...');
         final tokenizerValid =
             await _modelManager.isModelFileValid(kGeckoTokenizerFileName);
         _tokenizerDownloaded = tokenizerValid;
+        log_util.log.i(
+          '[ModelBloc] Gecko precheck: '
+          'tokenizerFile=$kGeckoTokenizerFileName '
+          'valid=$tokenizerValid',
+        );
         geckoReady = await _tryInitializeGecko();
+        log_util.log.i('[ModelBloc] _tryInitializeGecko() → geckoReady=$geckoReady');
+      } else if (!geckoDownloaded) {
+        log_util.log.i('[ModelBloc] → Gecko chưa download — skip init');
+      } else {
+        log_util.log.i('[ModelBloc] → Gecko đã ready — skip init');
       }
 
+      log_util.log.i('[ModelBloc] _onStatusChecked hoàn tất: gemmaReady=$gemmaReady, geckoReady=$geckoReady');
       emit(ModelLoaded(
         gemmaInfo: _modelManager.gemmaInfo,
         geckoInfo: _modelManager.geckoInfo,
@@ -196,6 +221,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
         geckoReady: geckoReady,
       ));
     } catch (e) {
+      log_util.log.e('[ModelBloc] _onStatusChecked lỗi: $e');
       _gemmaInitCompleter?.complete(false);
       emit(ModelError(e.toString()));
     } finally {

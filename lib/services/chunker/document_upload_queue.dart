@@ -161,6 +161,11 @@ class DocumentUploadQueue {
     logger.log.i('[UploadQueue] Processing: ${job.name} (${job.documentId})');
 
     try {
+      await _docsDao.updateDocumentStatus(
+        job.documentId,
+        IndexStatus.processing,
+      );
+
       // ─── Step 1: Parse (0.00 → 0.10) ──────────────────────────────────
       await _setProgress(job.documentId, 0.05);
       final rawText = await _parser.parse(job.filePath);
@@ -180,7 +185,9 @@ class DocumentUploadQueue {
       // Guard: Gecko phải ready trước khi embed
       if (!_gecko.isReady) {
         logger.log.w(
-          '[UploadQueue] Gecko not ready. Document=${job.name} (${job.documentId})',
+          '[UploadQueue] Gecko guard triggered: '
+          'isReady=${_gecko.isReady}, '
+          'Doc=${job.name} (${job.documentId})',
         );
         throw const UploadQueueException(
           'Embedding model (Gecko) chưa sẵn sàng. '
@@ -212,6 +219,7 @@ class DocumentUploadQueue {
           chunkIndex: Value(i),
           chunkText: Value(chunks[i]),
           tokenCount: Value((chunks[i].length / 4).round()),
+          createdAt: Value(DateTime.now()),
         ));
       }
 

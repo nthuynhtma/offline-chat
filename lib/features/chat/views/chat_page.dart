@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -40,6 +42,9 @@ class ChatView extends StatefulWidget {
 }
 
 class _ChatViewState extends State<ChatView> {
+  bool _isModelLoadingDialogVisible = false;
+  NavigatorState? _modelLoadingDialogNavigator;
+
   @override
   void initState() {
     super.initState();
@@ -56,111 +61,168 @@ class _ChatViewState extends State<ChatView> {
     final modelState = modelBloc.state;
 
     if (modelState is ModelLoaded) {
-      final isDownloaded =
+      final isGemmaDownloaded =
           modelState.gemmaInfo.status == ModelStatus.downloaded;
 
       // Nếu model chưa download → ChatBloc sẽ emit ChatError.needsModelDownload
       // → banner warning xử lý, không cần dialog
-      if (!isDownloaded) return;
-      // Chỉ coi là sẵn sàng khi cả Gemma và Gecko đều ready
-      if (modelState.gemmaReady && modelState.geckoReady) return;
+      if (!isGemmaDownloaded) {
+        _hideLoadingDialog();
+        return;
+      }
+
+      // Dialog này chỉ dành cho Gemma chat model. Gecko có trạng thái riêng
+      // trên nút đính kèm file, nên không chặn toàn bộ màn hình chat.
+      if (modelState.gemmaReady) {
+        _hideLoadingDialog();
+        return;
+      }
 
       // Dispatch StatusChecked để init phần chưa ready (idempotent)
       if (!modelBloc.isInitializingGemma) {
         modelBloc.add(const StatusChecked());
       }
 
-      // Show dialog loading — BlocListener bên trong sẽ tự đóng khi gemmaReady
+      // Show dialog loading — listener của ChatView sẽ tự đóng khi Gemma ready
       _showLoadingDialog();
     } else if (modelState is ModelLoading) {
       // ModelBloc đang loading → chờ init xong
     }
   }
 
-  void _showLoadingDialog() {
+  void _handleModelStateChanged(BuildContext context, ModelState state) {
     if (!mounted) return;
 
-    showDialog(
+    if (state is ModelLoaded) {
+      final isGemmaDownloaded =
+          state.gemmaInfo.status == ModelStatus.downloaded;
+
+      if (!isGemmaDownloaded) {
+        _hideLoadingDialog();
+        return;
+      }
+
+      if (state.gemmaReady) {
+        final wasShowingDialog = _isModelLoadingDialogVisible;
+        _hideLoadingDialog();
+        if (wasShowingDialog) {
+          context.read<ChatBloc>().add(const ModelBecameReady());
+        }
+        return;
+      }
+
+      // StatusChecked đã chạy xong nhưng Gemma vẫn chưa ready: đóng dialog để
+      // tránh kẹt modal vĩnh viễn, người dùng có thể retry từ Model Manager.
+      if (!context.read<ModelBloc>().isInitializingGemma) {
+        _hideLoadingDialog();
+      }
+    } else if (state is ModelError) {
+      _hideLoadingDialog();
+    }
+  }
+
+  void _showLoadingDialog() {
+    if (!mounted) return;
+    if (_isModelLoadingDialogVisible) return;
+
+    _isModelLoadingDialogVisible = true;
+    _modelLoadingDialogNavigator = Navigator.of(context, rootNavigator: true);
+
+    unawaited(showDialog<void>(
       context: context,
+      useRootNavigator: true,
       barrierDismissible: false,
       builder: (ctx) {
-        return BlocListener<ModelBloc, ModelState>(
-          listener: (context, state) {
-            if (state is ModelLoaded && state.gemmaReady) {
-              Navigator.of(context).pop();
-              context.read<ChatBloc>().add(const ModelBecameReady());
-            }
-            if (state is ModelError) {
-              Navigator.of(context).pop();
-            }
-          },
-          child: AlertDialog(
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: AppSpacing.lg,
-              vertical: AppSpacing.lg,
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  width: 48,
-                  height: 48,
-                  child: CircularProgressIndicator(strokeWidth: 3),
+        return const AlertDialog(
+          contentPadding: EdgeInsets.symmetric(
+            horizontal: AppSpacing.lg,
+            vertical: AppSpacing.lg,
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+              SizedBox(height: AppSpacing.lg),
+              Text(
+                'Đang nạp model AI vào bộ nhớ...',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: AppSpacing.sm),
+              Text(
+                'Model Gemma (2.8GB) đang được load. '
+                'Vui lòng đợi trong giây lát.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: AppColors.subtleLight,
                 ),
-                const SizedBox(height: AppSpacing.lg),
-                const Text(
-                  'Đang nạp model AI vào bộ nhớ...',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  'Model Gemma (2.8GB) đang được load. '
-                  'Vui lòng đợi trong giây lát.',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: AppColors.subtleLight,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         );
       },
-    );
+    ).whenComplete(() {
+      _isModelLoadingDialogVisible = false;
+      _modelLoadingDialogNavigator = null;
+    }));
+  }
+
+  void _hideLoadingDialog() {
+    if (!_isModelLoadingDialogVisible) return;
+
+    final navigator = _modelLoadingDialogNavigator;
+    _isModelLoadingDialogVisible = false;
+    _modelLoadingDialogNavigator = null;
+
+    if (navigator != null && navigator.mounted && navigator.canPop()) {
+      navigator.pop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _hideLoadingDialog();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.pop(),
-        ),
-        title: const Text('Chat'),
-        actions: [
-          const ScopeSelector(),
-          ClearButton(sessionId: widget.sessionId),
-        ],
-      ),
-      body: Column(
-        children: [
-          // ─── Banner "Chưa tải model" ──────────────────────────────────
-          const ModelNotInstalledBanner(),
-
-          // Chat body (loading / error / messages)
-          Expanded(
-            child: ChatBody(sessionId: widget.sessionId),
+    return BlocListener<ModelBloc, ModelState>(
+      listener: _handleModelStateChanged,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => context.pop(),
           ),
+          title: const Text('Chat'),
+          actions: [
+            const ScopeSelector(),
+            ClearButton(sessionId: widget.sessionId),
+          ],
+        ),
+        body: Column(
+          children: [
+            // ─── Banner "Chưa tải model" ──────────────────────────────────
+            const ModelNotInstalledBanner(),
 
-          // Attached files bar
-          AttachedFilesBar(sessionId: widget.sessionId),
+            // Chat body (loading / error / messages)
+            Expanded(
+              child: ChatBody(sessionId: widget.sessionId),
+            ),
 
-          // Input bar
-          ChatInputBar(sessionId: widget.sessionId),
-        ],
+            // Attached files bar
+            AttachedFilesBar(sessionId: widget.sessionId),
+
+            // Input bar
+            ChatInputBar(sessionId: widget.sessionId),
+          ],
+        ),
       ),
     );
   }

@@ -7,12 +7,10 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
 import 'package:offline_chat/core/errors/app_exception.dart';
+import 'package:offline_chat/core/constants/document_constants.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/features/knowledge/models/document_model.dart';
-import 'package:offline_chat/services/chunker/chunking_service.dart';
-import 'package:offline_chat/services/gecko/gecko_service.dart';
-import 'package:offline_chat/services/parser/document_parser_service.dart';
-import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
+import 'package:offline_chat/services/chunker/document_upload_queue.dart';
 
 abstract interface class DocumentRepository {
   Future<List<DocumentModel>> getAllDocuments();
@@ -31,30 +29,27 @@ abstract interface class DocumentRepository {
 
 class DocumentRepositoryImpl implements DocumentRepository {
   final AppDatabase _db;
-  final DocumentParserService _parser;
-  final ChunkingService _chunker;
-  final VectorStoreService _vectorStore;
-  final GeckoService _geckoService;
+  final DocumentUploadQueue _uploadQueue;
   final Uuid _uuid = const Uuid();
 
   DocumentRepositoryImpl(
     this._db,
-    this._parser,
-    this._chunker,
-    this._vectorStore,
-    this._geckoService,
+    this._uploadQueue,
   );
 
   @override
   Future<List<DocumentModel>> getAllDocuments() async {
-    final rows = await _db.documentsDao.getAllDocuments();
+    final rows = await _db.documentsDao.getDocumentsBySessionId(null);
     return rows.map(DocumentModel.fromDbRow).toList();
   }
 
   @override
   Stream<List<DocumentModel>> watchAllDocuments() =>
       _db.documentsDao.watchAllDocuments().map(
-            (rows) => rows.map(DocumentModel.fromDbRow).toList(),
+            (rows) => rows
+                .where((row) => row.sessionId == null)
+                .map(DocumentModel.fromDbRow)
+                .toList(),
           );
 
   @override
@@ -89,7 +84,7 @@ class DocumentRepositoryImpl implements DocumentRepository {
     progress(0.05); // 5% - copied file
 
     try {
-      // 1. Save document metadata
+      // Save metadata only. The shared upload queue owns parse/chunk/embed.
       await _db.documentsDao.insertDocument(DocumentsCompanion(
         id: Value(docId),
         name: Value(docName),
@@ -97,90 +92,24 @@ class DocumentRepositoryImpl implements DocumentRepository {
         sizeBytes: Value(fileSize),
         chunkCount: const Value(0),
         mimeType: Value(mimeType),
+        sessionId: const Value(null),
+        status: Value(IndexStatus.pending.toInt),
+        progress: const Value(0.0),
         createdAt: Value(DateTime.now()),
       ));
 
-      progress(0.1); // 10% - saved metadata
+      _uploadQueue.enqueue(DocumentUploadJob(
+        documentId: docId,
+        filePath: destPath,
+        name: docName,
+        sizeBytes: fileSize,
+        mimeType: mimeType,
+        sessionId: null,
+      ));
 
-      // 2. Parse → rawText
-      final rawText = await _parser.parse(destPath);
-      progress(0.2); // 20% - parsed
-
-      // 3. Chunk text
-      final chunks = _chunker.chunk(rawText);
-      progress(0.3); // 30% - chunked
-
-      if (chunks.isEmpty) {
-        throw const DocumentParseException('No text content found in document');
-      }
-
-      // 4. Create chunk entries
-      final chunkEntries = <_ChunkEntry>[];
-      for (int i = 0; i < chunks.length; i++) {
-        final chunkId = _uuid.v4();
-        chunkEntries.add(_ChunkEntry(
-          id: chunkId,
-          text: chunks[i],
-          index: i,
-        ));
-      }
-
-      // 5. Insert chunks into database
-      final chunkCompanions = chunkEntries.map((e) {
-        return ChunksCompanion(
-          id: Value(e.id),
-          documentId: Value(docId),
-          chunkText: Value(e.text),
-          chunkIndex: Value(e.index),
-          tokenCount: Value((e.text.length / 4).ceil()),
-          createdAt: Value(DateTime.now()),
-        );
-      }).toList();
-      await _db.chunksDao.insertChunks(chunkCompanions);
-
-      progress(0.4); // 40% - chunks saved
-
-      // 6. Embed chunks (only if Gecko service is ready)
-      if (_geckoService.isReady) {
-        final texts = chunkEntries.map((e) => e.text).toList();
-        final totalChunks = texts.length;
-
-        // Process in batches of 10 for progress reporting
-        const batchSize = 10;
-        final allVectors = <List<double>>[];
-
-        for (int i = 0; i < totalChunks; i += batchSize) {
-          final end = (i + batchSize > totalChunks) ? totalChunks : i + batchSize;
-          final batch = texts.sublist(i, end);
-          final vectors = await _geckoService.embedBatch(batch);
-          allVectors.addAll(vectors);
-
-          // Progress: 40% → 90% for embedding
-          final embedProgress = 0.4 + (0.5 * (end / totalChunks));
-          progress(embedProgress);
-        }
-
-        // 7. Store vectors
-        final vectorEntries = <VectorEntry>[];
-        for (int i = 0; i < chunkEntries.length; i++) {
-          vectorEntries.add(VectorEntry(
-            chunkId: chunkEntries[i].id,
-            embedding: allVectors[i],
-          ));
-        }
-        await _vectorStore.insertBatch(vectorEntries);
-
-        progress(0.95); // 95% - vectors stored
-      }
-
-      // 8. Update chunk count
-      await _db.documentsDao.updateChunkCount(docId, chunks.length);
-
-      progress(1.0); // 100% - done
-
-      // Return document model
       final row = await _db.documentsDao.getAllDocuments();
       final doc = row.firstWhere((d) => d.id == docId);
+      progress(0.1); // 10% - queued
       return DocumentModel.fromDbRow(doc);
     } catch (e) {
       // Clean up on failure
@@ -201,9 +130,9 @@ class DocumentRepositoryImpl implements DocumentRepository {
       final chunks = await _db.chunksDao.getChunksByDocument(id);
       final chunkIds = chunks.map((c) => c.id).toList();
 
-      // Delete vectors
+      // Delete vectors (via vectorsDao)
       if (chunkIds.isNotEmpty) {
-        await _vectorStore.deleteByChunkIds(chunkIds);
+        await _db.vectorsDao.deleteVectorsByChunkIds(chunkIds);
       }
 
       // Get document for file path
@@ -236,42 +165,21 @@ class DocumentRepositoryImpl implements DocumentRepository {
       final oldChunks = await _db.chunksDao.getChunksByDocument(id);
       final oldChunkIds = oldChunks.map((c) => c.id).toList();
       if (oldChunkIds.isNotEmpty) {
-        await _vectorStore.deleteByChunkIds(oldChunkIds);
+        await _db.vectorsDao.deleteVectorsByChunkIds(oldChunkIds);
       }
       await _db.chunksDao.deleteChunksByDocument(id);
+      await _db.documentsDao.updateChunkCount(id, 0);
+      await _db.documentsDao.updateDocumentStatus(id, IndexStatus.pending);
+      await _db.documentsDao.updateDocumentProgress(id, 0, 100);
 
-      // Re-parse and re-chunk
-      final rawText = await _parser.parse(doc.path);
-      final chunks = _chunker.chunk(rawText);
-
-      final chunkEntries = chunks.asMap().entries.map((e) {
-        return ChunksCompanion(
-          id: Value(_uuid.v4()),
-          documentId: Value(id),
-          chunkText: Value(e.value),
-          chunkIndex: Value(e.key),
-          tokenCount: Value((e.value.length / 4).ceil()),
-          createdAt: Value(DateTime.now()),
-        );
-      }).toList();
-
-      await _db.chunksDao.insertChunks(chunkEntries);
-      await _db.documentsDao.updateChunkCount(id, chunks.length);
-
-      // Re-embed if Gecko is ready
-      if (_geckoService.isReady) {
-        final texts = chunks;
-        final allVectors = await _geckoService.embedBatch(texts);
-        final vectorEntries = <VectorEntry>[];
-        final newChunks = await _db.chunksDao.getChunksByDocument(id);
-        for (int i = 0; i < newChunks.length && i < allVectors.length; i++) {
-          vectorEntries.add(VectorEntry(
-            chunkId: newChunks[i].id,
-            embedding: allVectors[i],
-          ));
-        }
-        await _vectorStore.insertBatch(vectorEntries);
-      }
+      _uploadQueue.enqueuePriority(DocumentUploadJob(
+        documentId: id,
+        filePath: doc.path,
+        name: doc.name,
+        sizeBytes: doc.sizeBytes,
+        mimeType: doc.mimeType,
+        sessionId: doc.sessionId,
+      ));
     } catch (e) {
       throw StorageException('Reindex failed: $e');
     }
@@ -292,11 +200,4 @@ class DocumentRepositoryImpl implements DocumentRepository {
         return 'application/octet-stream';
     }
   }
-}
-
-class _ChunkEntry {
-  final String id;
-  final String text;
-  final int index;
-  _ChunkEntry({required this.id, required this.text, required this.index});
 }

@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
 enum ModelStatus {
   notDownloaded,
@@ -399,9 +400,9 @@ class ModelManagerServiceImpl implements ModelManagerService {
 
     final path = p.join(_modelsDirectory!, fileName);
     final file = File(path);
-    if (!await file.exists()) return false;
+    final exists = await file.exists();
+    final size = exists ? await file.length() : 0;
 
-    final size = await file.length();
     final expectedSize = fileName == kGemmaModelFileName
         ? _gemmaInfo.fileSizeBytes
         : fileName == kGeckoModelFileName
@@ -410,8 +411,22 @@ class ModelManagerServiceImpl implements ModelManagerService {
                 ? kTokenizerSizeBytes
                 : null;
 
-    if (expectedSize == null) return false;
-    return (size - expectedSize).abs() < _sizeTolerance;
+    if (expectedSize == null) {
+      log_util.log.w('[ModelManager] isModelFileValid: unknown fileName=$fileName — returning false');
+      return false;
+    }
+
+    final isValid = exists && (size - expectedSize).abs() < _sizeTolerance;
+    log_util.log.i(
+      '[ModelManager] Validation: '
+      'file=$fileName '
+      'path=$path '
+      'exists=$exists '
+      'size=$size '
+      'expected=$expectedSize '
+      'valid=$isValid',
+    );
+    return isValid;
   }
 
   @override

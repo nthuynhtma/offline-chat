@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import 'package:offline_chat/core/errors/app_exception.dart';
 import 'package:offline_chat/features/knowledge/models/document_model.dart';
 import 'package:offline_chat/features/knowledge/repositories/document_repository.dart';
+import 'package:offline_chat/services/chunker/document_upload_queue.dart';
 
 // Events
 sealed class KnowledgeEvent extends Equatable {
@@ -39,6 +42,33 @@ class DocumentReindexRequested extends KnowledgeEvent {
 
   @override
   List<Object?> get props => [id];
+}
+
+/// Internal: documents changed from DB watch stream.
+class _DocumentsChanged extends KnowledgeEvent {
+  final List<DocumentModel> documents;
+  const _DocumentsChanged(this.documents);
+
+  @override
+  List<Object?> get props => [documents];
+}
+
+/// Internal: documents watch stream error.
+class _DocumentsWatchFailed extends KnowledgeEvent {
+  final Object error;
+  const _DocumentsWatchFailed(this.error);
+
+  @override
+  List<Object?> get props => [error];
+}
+
+/// Internal: queue result (success or fail).
+class _QueueResultArrived extends KnowledgeEvent {
+  final DocumentUploadResult result;
+  const _QueueResultArrived(this.result);
+
+  @override
+  List<Object?> get props => [result];
 }
 
 // States
@@ -81,7 +111,6 @@ class KnowledgeIndexing extends KnowledgeState {
 
 class KnowledgeError extends KnowledgeState {
   final String message;
-  // FIX #5: Giữ documents khi lỗi để UI không mất danh sách
   final List<DocumentModel> documents;
   const KnowledgeError(this.message, {this.documents = const []});
 
@@ -92,12 +121,27 @@ class KnowledgeError extends KnowledgeState {
 // Bloc
 class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
   final DocumentRepository _documentRepository;
+  final DocumentUploadQueue _uploadQueue;
 
-  KnowledgeBloc(this._documentRepository) : super(const KnowledgeInitial()) {
+  StreamSubscription<List<DocumentModel>>? _watchSubscription;
+  StreamSubscription<DocumentUploadResult>? _queueResultSubscription;
+
+  KnowledgeBloc(
+    this._documentRepository,
+    this._uploadQueue,
+  ) : super(const KnowledgeInitial()) {
     on<DocumentsLoaded>(_onDocumentsLoaded);
     on<DocumentImportRequested>(_onDocumentImportRequested);
     on<DocumentDeleteRequested>(_onDocumentDeleteRequested);
     on<DocumentReindexRequested>(_onDocumentReindexRequested);
+    on<_DocumentsChanged>(_onDocumentsChanged);
+    on<_DocumentsWatchFailed>(_onDocumentsWatchFailed);
+    on<_QueueResultArrived>(_onQueueResultArrived);
+
+    // Subscribe queue results
+    _queueResultSubscription = _uploadQueue.resultStream.listen(
+      (result) => add(_QueueResultArrived(result)),
+    );
   }
 
   Future<void> _onDocumentsLoaded(
@@ -106,6 +150,12 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
   ) async {
     emit(const KnowledgeLoading());
     try {
+      await _watchSubscription?.cancel();
+      _watchSubscription = _documentRepository.watchAllDocuments().listen(
+            (documents) => add(_DocumentsChanged(documents)),
+            onError: (e) => add(_DocumentsWatchFailed(e)),
+          );
+
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {
@@ -119,39 +169,25 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
   ) async {
     final fileName = event.filePath.split('/').last;
 
-    // FIX #5: Dùng try/finally để đảm bảo LUÔN thoát khỏi KnowledgeIndexing
-    // dù import thành công hay thất bại
     try {
-      await _documentRepository.importDocumentWithProgress(
-        event.filePath,
-        onProgress: (documentId, progress) {
-          // Chỉ emit Indexing khi chưa hoàn tất (< 1.0)
-          // Khi progress == 1.0 không emit ở đây — để finally xử lý
-          if (progress < 1.0) {
-            emit(KnowledgeIndexing(
-              documentId: documentId,
-              documentName: fileName,
-              progress: progress,
-            ));
-          }
-        },
-      );
+      // importDocument now: copy file + insert metadata + enqueue → returns immediately
+      final doc = await _documentRepository.importDocument(event.filePath);
 
-      // Import thành công: load lại danh sách
-      final documents = await _documentRepository.getAllDocuments();
-      emit(KnowledgeLoaded(documents));
+      // Show indexing state immediately
+      emit(KnowledgeIndexing(
+        documentId: doc.id,
+        documentName: fileName,
+        progress: 0.0,
+      ));
     } catch (e) {
-      // FIX #5: Khi lỗi load lại documents (có thể rỗng nếu DB lỗi)
-      // Không để state kẹt tại KnowledgeIndexing
       List<DocumentModel> existingDocs = [];
       try {
         existingDocs = await _documentRepository.getAllDocuments();
-      } catch (_) {
-        // Nếu cả getAllDocuments cũng lỗi thì dùng danh sách rỗng
-      }
+      } catch (_) {}
 
       final message = e is AppException ? e.message : e.toString();
-      emit(KnowledgeError(message, documents: existingDocs));
+      emit(KnowledgeError('Không thể import "$fileName": $message',
+          documents: existingDocs));
     }
   }
 
@@ -159,7 +195,6 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     DocumentDeleteRequested event,
     Emitter<KnowledgeState> emit,
   ) async {
-    // Lưu lại documents hiện tại để rollback nếu lỗi
     final currentDocs = state is KnowledgeLoaded
         ? (state as KnowledgeLoaded).documents
         : <DocumentModel>[];
@@ -169,7 +204,6 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
       final documents = await _documentRepository.getAllDocuments();
       emit(KnowledgeLoaded(documents));
     } catch (e) {
-      // FIX: Trả về documents cũ khi delete lỗi, không mất UI
       emit(KnowledgeError(e.toString(), documents: currentDocs));
     }
   }
@@ -190,5 +224,79 @@ class KnowledgeBloc extends Bloc<KnowledgeEvent, KnowledgeState> {
     } catch (e) {
       emit(KnowledgeError(e.toString(), documents: currentDocs));
     }
+  }
+
+  void _onDocumentsChanged(
+    _DocumentsChanged event,
+    Emitter<KnowledgeState> emit,
+  ) {
+    final currentState = state;
+
+    if (currentState is KnowledgeIndexing) {
+      // Đang indexing — cập nhật progress từ DocumentModel.progress trong DB
+      final indexingDoc = event.documents
+          .where((d) => d.id == currentState.documentId)
+          .firstOrNull;
+
+      if (indexingDoc != null) {
+        emit(KnowledgeIndexing(
+          documentId: currentState.documentId,
+          documentName: currentState.documentName,
+          progress: indexingDoc.progress,
+        ));
+      }
+      // Không emit loaded — giữ state indexing
+      return;
+    }
+
+    emit(KnowledgeLoaded(event.documents));
+  }
+
+  Future<void> _onDocumentsWatchFailed(
+    _DocumentsWatchFailed event,
+    Emitter<KnowledgeState> emit,
+  ) async {
+    List<DocumentModel> existingDocs = [];
+    try {
+      existingDocs = await _documentRepository.getAllDocuments();
+    } catch (_) {}
+    emit(KnowledgeError(event.error.toString(), documents: existingDocs));
+  }
+
+  /// Xử lý kết quả từ queue khi job hoàn thành hoặc fail.
+  Future<void> _onQueueResultArrived(
+    _QueueResultArrived event,
+    Emitter<KnowledgeState> emit,
+  ) async {
+    final result = event.result;
+
+    if (result.success) {
+      // Reload documents — DB stream sẽ tự emit KnowledgeLoaded
+      // Nhưng nếu đang ở KnowledgeIndexing, cần thoát khỏi nó
+      try {
+        final documents = await _documentRepository.getAllDocuments();
+        emit(KnowledgeLoaded(documents));
+      } catch (e) {
+        emit(KnowledgeError(e.toString()));
+      }
+    } else {
+      // Queue processing failed — show error
+      List<DocumentModel> existingDocs = [];
+      try {
+        existingDocs = await _documentRepository.getAllDocuments();
+      } catch (_) {}
+
+      emit(KnowledgeError(
+        result.error ?? 'Indexing thất bại',
+        documents: existingDocs,
+      ));
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    await _watchSubscription?.cancel();
+    await _queueResultSubscription?.cancel();
+    return super.close();
   }
 }

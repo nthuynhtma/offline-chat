@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
+
 
 import 'package:offline_chat/core/errors/app_exception.dart';
 
@@ -96,7 +98,17 @@ class DocumentParserServiceImpl implements DocumentParserService {
         throw const DocumentParseException('No text found in PDF');
       }
       return text;
+    } on FormatException catch (e, stackTrace) {
+      log_util.log.e('❌ PDF FormatException: file có thể bị lỗi hoặc là PDF ảnh (scan): $e\n$stackTrace');
+      Error.throwWithStackTrace(
+        DocumentParseException(
+          'PDF format error: File may be corrupted or image-based (scanned) PDF. '
+          'Only text-based PDFs are supported.',
+        ),
+        stackTrace,
+      );
     } catch (e, stackTrace) {
+      log_util.log.e('❌ PDF parsing error: $e\n$stackTrace');
       if (e is DocumentParseException) {
         Error.throwWithStackTrace(e, stackTrace);
       }
