@@ -135,7 +135,7 @@ final class PromptBuilderImpl implements PromptBuilder {
     buffer.write('<start_of_turn>model\n');
 
     final result = buffer.toString();
-    log_util.log.d('🔨 [PromptBuilder] Hoàn tất build prompt (${result.length} chars)');
+    log_util.log.i('🔨 [PromptBuilder] Hoàn tất build prompt (${result.length} chars):\n$result');
     return result;
   }
 }

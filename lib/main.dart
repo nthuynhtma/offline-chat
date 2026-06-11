@@ -42,5 +42,5 @@ void main() async {
   // Setup dependency injection
   await setupLocator();
 
-  runApp(App());
+  runApp(const App());
 }

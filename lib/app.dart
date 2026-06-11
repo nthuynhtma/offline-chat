@@ -10,6 +10,7 @@ import 'package:offline_chat/features/model_manager/views/model_manager_page.dar
 import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/views/session_list_page.dart';
 import 'package:offline_chat/features/settings/views/settings_page.dart';
+import 'package:offline_chat/features/model_manager/widgets/model_onboarding_coordinator.dart';
 import 'package:offline_chat/injection/service_locator.dart';
 
 /// Global notifier for theme mode (light/dark).
@@ -17,42 +18,57 @@ import 'package:offline_chat/injection/service_locator.dart';
 final ValueNotifier<ThemeMode> themeModeNotifier =
     ValueNotifier(ThemeMode.light);
 
-class App extends StatelessWidget {
-  App({super.key});
+class App extends StatefulWidget {
+  const App({super.key});
 
-  final GoRouter _router = GoRouter(
-    initialLocation: '/',
-    routes: [
-      GoRoute(
-        path: '/',
-        name: 'sessions',
-        builder: (context, state) => const SessionListPage(),
-      ),
-      GoRoute(
-        path: '/chat/:sessionId',
-        name: 'chat',
-        builder: (context, state) {
-          final sessionId = state.pathParameters['sessionId']!;
-          return ChatPage(sessionId: sessionId);
-        },
-      ),
-      GoRoute(
-        path: '/knowledge',
-        name: 'knowledge',
-        builder: (context, state) => const KnowledgePage(),
-      ),
-      GoRoute(
-        path: '/settings',
-        name: 'settings',
-        builder: (context, state) => const SettingsPage(),
-      ),
-      GoRoute(
-        path: '/settings/models',
-        name: 'models',
-        builder: (context, state) => const ModelManagerPage(),
-      ),
-    ],
-  );
+  @override
+  State<App> createState() => _AppState();
+}
+
+class _AppState extends State<App> {
+  /// Key dùng để truy cập Navigator từ bên ngoài (ModelOnboardingCoordinator).
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  late final GoRouter _router;
+
+  @override
+  void initState() {
+    super.initState();
+    _router = GoRouter(
+      navigatorKey: _navigatorKey,
+      initialLocation: '/',
+      routes: [
+        GoRoute(
+          path: '/',
+          name: 'sessions',
+          builder: (context, state) => const SessionListPage(),
+        ),
+        GoRoute(
+          path: '/chat/:sessionId',
+          name: 'chat',
+          builder: (context, state) {
+            final sessionId = state.pathParameters['sessionId']!;
+            return ChatPage(sessionId: sessionId);
+          },
+        ),
+        GoRoute(
+          path: '/knowledge',
+          name: 'knowledge',
+          builder: (context, state) => const KnowledgePage(),
+        ),
+        GoRoute(
+          path: '/settings',
+          name: 'settings',
+          builder: (context, state) => const SettingsPage(),
+        ),
+        GoRoute(
+          path: '/settings/models',
+          name: 'models',
+          builder: (context, state) => const ModelManagerPage(),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +95,12 @@ class App extends StatelessWidget {
             debugShowCheckedModeBanner: false,
             routerConfig: _router,
             themeMode: mode,
+            builder: (context, child) {
+              return ModelOnboardingCoordinator(
+                navigatorKey: _navigatorKey,
+                child: child!,
+              );
+            },
             theme: ThemeData(
               colorScheme: ColorScheme.fromSeed(
                 seedColor: const Color(0xFF1A73E8),

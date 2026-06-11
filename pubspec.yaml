@@ -53,6 +53,7 @@ dependencies:
   logger: ^2.7.0
   scrollview_observer: ^1.27.0
   flutter_markdown_plus: ^1.0.7
+  shared_preferences: ^2.5.5
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -650,10 +650,59 @@ lib/
 
 ---
 
-## Các vấn đề đã fix gần đây
+## Model Onboarding Coordinator (ModelOnboardingCoordinator)
+
+### Kiến trúc
+```
+ModelOnboardingCoordinator (StatefulWidget) — App level
+├── Nhận navigatorKey từ App._navigatorKey (GlobalKey<NavigatorState>)
+├── BlocListener<ModelBloc> lắng nghe state tại App level
+├── listenWhen: !_promptCompleted && !_isDialogVisible && !_hasSeenOnboarding
+│              && curr is ModelLoaded && curr.gemmaInfo.status == notDownloaded
+└── listener: postFrameCallback → _showConfirmDialog()
+
+Luồng:
+  1. Chờ ModelBloc emit ModelLoaded & gemma chưa download
+  2. Show Confirm dialog → "Gemma (2.6GB) + Gecko (111MB)"
+  3. User bấm [Tải xuống] → dispatch cả GemmaDownloadStarted() + GeckoDownloadStarted() (song song)
+  4. Progress dialog: BlocBuilder hiển thị 2 progress bar riêng (Gemma + Gecko)
+  5. Cả 2 hoàn tất → đóng dialog + SnackBar "Model AI đã sẵn sàng!"
+  6. Lỗi → [Để sau] / [Thử lại] (retry cả 2)
+  7. "Để sau" → _promptCompleted = true, banner ChatPage fallback
+
+SharedPreferences:
+  hasSeenModelOnboarding:
+    - Set = true NGAY khi confirm dialog hiển thị lần đầu
+    - Đọc để quyết định có show onboarding ở lần mở app tiếp theo
+    - Nếu true → bỏ qua, banner ChatPage chịu trách nhiệm nhắc nhở
+
+### Navigation context handling
+  Dùng GlobalKey<NavigatorState> truyền từ App xuống coordinator.
+  showDialog() dùng context từ navigatorKey.currentContext (thay vì context của BlocListener)
+  → tránh lỗi "Navigator operation requested with a context that does not include a Navigator"
+
+Sửa đổi kiến trúc App thành StatefulWidget:
+  - GlobalKey<NavigatorState> _navigatorKey — dùng cho cả GoRouter + Coordinator
+  - GoRouter(navigatorKey: _navigatorKey)
+  - MaterialApp.router(builder: (context, child) => ModelOnboardingCoordinator(navigatorKey: ..., child: child!))
+
+Key files:
+  - lib/features/model_manager/widgets/model_onboarding_coordinator.dart
+  - lib/app.dart (StatefulWidget)
+  - lib/core/utils/logger.dart — prefix [Onboarding] cho debug logs
+
+### Các vấn đề đã fix gần đây
 
 | Vấn đề | Fix |
 |--------|-----|
+| **Onboarding dialog không show khi lần đầu mở app** | Tạo `ModelOnboardingCoordinator` — BlocListener trigger khi model chưa download |
+| **No MaterialLocalizations found khi showDialog từ BlocListener ngoài MaterialApp** | Dùng `builder` parameter của `MaterialApp.router` thay vì wrap ngoài |
+| **Navigator not found — builder context không có Navigator** | Dùng `GlobalKey<NavigatorState>` + `GoRouter.navigatorKey` + showDialog qua `navigatorKey.currentContext` |
+| **Banner ChatPage không hiển thị khi model chưa tải** | `ModelNotInstalledBanner` đọc từ `ModelBloc` thay vì `ChatBloc` |
+| **Chỉ tải Gemma, không tải Gecko** | Dispatch cả `GemmaDownloadStarted()` + `GeckoDownloadStarted()` song song |
+| **Dialog không có lối thoát khi lỗi** | Error dialog thêm [Để sau] + [Thử lại] |
+| **SharedPreferences semantics sai: set sau dialog xuất hiện** | `hasSeenModelOnboarding` set true ngay khi dialog hiển thị lần đầu |
+| **Trigger condition sai khi ModelLoading chưa hoàn tất** | `listenWhen` check `curr is ModelLoaded && gemmaInfo.status == notDownloaded` |
 | `getResponseAsync(prompt)` không khớp API mới | Chuyển sang `addQueryChunk(Message)` + `getResponseAsync()` không tham số |
 | `dynamic` dispatch che giấu lỗi compile | Dùng `InferenceModel` type-safe |
 | `add()` trong `stream.listen()` gây race condition | Bọc trong `Future.microtask()` |
