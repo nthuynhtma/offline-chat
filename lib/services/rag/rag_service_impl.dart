@@ -68,23 +68,31 @@ class RagServiceImpl implements RagService {
     // 2. Xác định document IDs theo scope (filter trước ranking)
     Set<String>? allowedDocIds;
     try {
-      if (scope == KnowledgeScope.sessionOnly && sessionId != null) {
-        // Session documents only
-        final docs = await _db.documentsDao.getDocumentsBySessionId(sessionId);
-        allowedDocIds = docs.map((d) => d.id).toSet();
+      if (scope == KnowledgeScope.attachedOnly && sessionId != null) {
+        // Session documents + attached global docs
+        final sessionDocs = await _db.documentsDao.getDocumentsBySessionId(sessionId);
+        final refDocIds = await _db.sessionDocumentRefsDao.getDocumentIdsBySession(sessionId);
+        allowedDocIds = {
+          ...sessionDocs.map((d) => d.id),
+          ...refDocIds,
+        };
       } else if (scope == KnowledgeScope.globalOnly) {
         // Global documents only
         final docs = await _db.documentsDao.getDocumentsBySessionId(null);
         allowedDocIds = docs.map((d) => d.id).toSet();
-      } else if (scope == KnowledgeScope.globalAndSession) {
-        // Global + session documents
+      } else if (scope == KnowledgeScope.attachedAndGlobal) {
+        // Global + session + attached global docs
         final globalDocs = await _db.documentsDao.getDocumentsBySessionId(null);
         final sessionDocs = sessionId != null
             ? await _db.documentsDao.getDocumentsBySessionId(sessionId)
             : <Document>[];
+        final refDocIds = sessionId != null
+            ? await _db.sessionDocumentRefsDao.getDocumentIdsBySession(sessionId)
+            : <String>{};
         allowedDocIds = {
           ...globalDocs.map((d) => d.id),
           ...sessionDocs.map((d) => d.id),
+          ...refDocIds,
         };
       }
       // Nếu không có documents nào trong scope → skip RAG

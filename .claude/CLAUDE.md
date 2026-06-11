@@ -131,14 +131,24 @@ _MessageListState:
 - **Session KB** — Tài liệu upload trong từng chat (`sessionId = abc123`)
 
 ```
-documents — thêm:
+documents:
+  ├── id (text, PK)
+  ├── name, path, sizeBytes, mimeType
   ├── sessionId (nullable, FK→sessions.id ON DELETE CASCADE)
   ├── status (enum IndexStatus: pending=0, processing=1, completed=2, failed=3)
   ├── progress (real 0.0→1.0)
-  └── errorMessage (nullable)
+  ├── errorMessage (nullable)
+  ├── retryCount (int, default=0)
+  └── lastProcessedAt (datetime nullable)
 
-sessions — thêm:
-  └── knowledgeScope (int: 0=sessionOnly, 1=globalOnly, 2=globalAndSession)
+sessions:
+  └── knowledgeScope (int: 0=attachedOnly, 1=globalOnly, 2=attachedAndGlobal)
+
+session_document_refs (junction table — attach global docs vào session):
+  ├── sessionId (FK→sessions.id ON DELETE CASCADE)
+  ├── documentId (FK→documents.id ON DELETE CASCADE)
+  └── attachedAt (datetime)
+  PK: (sessionId, documentId)
 ```
 
 ### KnowledgeScope enum (lib/core/constants/document_constants.dart)
@@ -156,24 +166,58 @@ Lưu theo conversation, persist qua session — không mất khi restart app.
 ```
 Search:
   1. Xác định allowedDocumentIds theo KnowledgeScope
-     - sessionOnly: WHERE sessionId = currentSessionId
+     - attachedOnly: WHERE sessionId = currentSessionId (session docs) + session_document_refs (referenced global docs)
      - globalOnly: WHERE sessionId IS NULL
-     - globalAndSession: WHERE sessionId IS NULL OR sessionId = currentSessionId
+     - attachedAndGlobal: WHERE sessionId IS NULL OR sessionId = currentSessionId
   2. Pre-topK (200 candidates) → cosine similarity
   3. Re-rank → topK (20)
 ```
 
 **Fix logic:** Filter trước ranking, không filter sau topK (tránh mất kết quả hợp lệ).
 
-### Indexing Pipeline (non-blocking, queue tuần tự)
+### DocumentUploadQueue — FIFO Upload Pipeline
 ```
-Upload file
-  → Create document record (status=pending)
-  → unawaited(_processFile()):
-      1. Parse (step 1/3) → update progress
-      2. Chunk (step 2/3) → update progress
-      3. Embed (step 3/3) → update progress, status=completed
-  → UI badge: [Processing... 45%] → [Ready]
+Upload file → ChatPage 📎
+  └→ FilePicker (pdf, docx, txt, md, allowMultiple)
+       └→ insertDocument(status=pending)
+            └→ DocumentUploadQueue.enqueue(job)
+                 └→ FIFO _processNext() (Future chain, không lock phức tạp)
+                      └→ _processJob():
+                           Parse    0.00 → 0.10
+                           Chunk    0.10 → 0.20
+                           Embed    0.20 → 0.95  (per chunk, progressive %)
+                           Insert   0.95 → 1.00  (chunks + vectors)
+                           Complete 1.00          (status=completed)
+
+Granular progress (hiển thị realtime trên SessionFilesPanel):
+  contract.pdf  [████████░░] 82%
+
+Retry (khi status=failed):
+  SessionFilesPanel → Refresh button
+    └→ DocumentUploadQueue.retry(documentId)
+         ├→ Check status == failed
+         ├→ Reset status=pending, retryCount=0
+         └→ enqueuePriority() — đầu queue, xử lý ngay
+
+Gecko Embedding Lock (tránh race condition GPU/FFI):
+  GeckoServiceImpl._runLocked<T>(fn):
+    await _lock;        // chờ previous lock
+    _lock = completer;  // set lock mới
+    try { return fn(); }
+    finally { completer.complete(); } // release
+
+  Hiệu quả: FIFO trên embed/embedBatch, không cần thêm dependencies.
+
+Chunks + Vectors:
+  - Tạo ChunksCompanion (uuid.v4 id, documentId, chunkIndex, chunkText, tokenCount)
+  - insertChunks batch → getChunksByDocument (Drift auto-generate)
+  - VectorEntry(chunkId, embedding) → insertBatch
+  - updateChunkCount, updateDocumentStatus(completed), resetRetryCount
+
+SessionFilesCubit (Bloc):
+  - Subscribes: watchAllDocuments() + queue.resultStream + queue.stateStream
+  - Filter theo sessionId → SessionFileItem(name, status, progress, errorMessage, retryCount)
+  - Emit: SessionFilesLoaded(files, queueState, pendingCount)
 ```
 
 ### Cascade Delete
@@ -187,14 +231,22 @@ Delete Session
 
 ### Key files:
 - `lib/core/constants/document_constants.dart` — Enums (KnowledgeScope, IndexStatus, DocumentScope)
-- `lib/database/tables/documents_table.dart` — Schema (sessionId, status, progress, errorMessage)
+- `lib/database/tables/documents_table.dart` — Schema (sessionId, status, progress, errorMessage, retryCount, lastProcessedAt)
 - `lib/database/tables/sessions_table.dart` — Schema (knowledgeScope)
-- `lib/database/daos/documents_dao.dart` — Queries: getDocumentsBySessionId, getDocumentIdsByScope, updateDocumentProgress
+- `lib/database/tables/session_document_refs_table.dart` — Junction table (sessionId, documentId, attachedAt)
+- `lib/database/daos/documents_dao.dart` — Queries: getDocumentsBySessionId, getDocumentIdsByScope, updateDocumentProgress, getDocumentsByRetryNeeded, incrementRetryCount, resetRetryCount
+- `lib/database/daos/session_document_refs_dao.dart` — CRUD cho attached refs
 - `lib/services/rag/rag_service.dart` — retrieve(scope, sessionId)
-- `lib/services/rag/rag_service_impl.dart` — Scope-based document filter
+- `lib/services/rag/rag_service_impl.dart` — Scope-based document filter + session_document_refs support
 - `lib/services/vectorstore/vector_store_service.dart` — 2-step search: filter→preTopK→re-rank
+- `lib/services/chunker/document_upload_queue.dart` — FIFO queue + retry + granular progress
+- `lib/services/gecko/gecko_service.dart` — FIFO lock (Completer)
 - `lib/features/chat/bloc/chat_bloc.dart` — KnowledgeScopeChanged event, load scope từ session
 - `lib/features/session/models/session_model.dart` — knowledgeScope field
+- `lib/features/knowledge/bloc/session_files_cubit.dart` — File list cubit (watch DB + queue)
+- `lib/features/knowledge/views/session_files_panel.dart` — Bottom sheet UI (status, progress %, retry button)
+- `lib/features/chat/views/chat_page.dart` — 📎 Attach button + file picker + attach menu
+- `lib/injection/service_locator.dart` — Register DocumentUploadQueue + SessionFilesCubit
 
 ---
 
@@ -465,14 +517,24 @@ lib/
 │   │   ├── bloc/                  ← chat_bloc.dart (session-based, token budget dynamic)
 │   │   ├── models/
 │   │   ├── repositories/
-│   │   └── views/                 ← chat_page.dart, message_bubble.dart, rag_sources_widget.dart
+│   │   └── views/                 ← chat_page.dart (+📎 attach file), message_bubble.dart, rag_sources_widget.dart
 │   ├── session/
 │   ├── knowledge/
+│   │   ├── bloc/
+│   │   │   ├── knowledge_bloc.dart
+│   │   │   └── session_files_cubit.dart  ← file list cubit (watch DB + queue)
+│   │   └── views/
+│   │       └── session_files_panel.dart ← bottom sheet (progress %, retry)
 │   └── model_manager/
 ├── services/
 │   ├── gemma/                     ← gemma_service.dart (session-based + legacy)
 │   ├── gecko/
+│   │   ├── gecko_service.dart     ← FIFO lock (Completer)
+│   │   └── gecko_retry_service.dart
 │   ├── vectorstore/
+│   ├── chunker/
+│   │   ├── chunking_service.dart
+│   │   └── document_upload_queue.dart ← FIFO queue + retry + granular progress
 │   ├── rag/                       ← rag_service, rag_context, rag_service_impl (RAG pipeline interface)
 │   ├── memory_store/              ← memory_store_service, summary_service, memory_prompt_formatter
 │   ├── context/                   ← context_manager_service.dart (@Deprecated)
@@ -515,6 +577,10 @@ lib/
 | **PromptBuilder ordering sai (RAG trước History) + thiếu delimiter** | Sửa thành: System → Memories → Summary → `<end_of_turn>` → History → RAG (sát question) → Question. Thêm delimiter `=== ... ===` cho mỗi section. |
 | **Thiếu observability cho RAG pipeline — không biết retrieval quality** | Thêm **RagTelemetry** (timing, scores, chunks, budget, state) + **RagTelemetryAggregator** (health report, score histogram). Log mỗi query. |
 | **Bad state: Session is closed sau Auto Summary — không chat được lần 2** | `generate()` set `_session = null` trước `_model!.createSession()` — tránh dirty state. LiteRT LM chỉ support 1 session, legacy API invalidate session cũ. ChatBloc có guard recreate session (`if (!hasActiveSession) → _createGemmaSessionWithHistory()`). |
+| **Gecko concurrent embedding race condition GPU/FFI** | Thêm FIFO lock dùng Completer trong GeckoServiceImpl (`_runLocked<T>`), không cần thêm dependencies |
+| **Upload blocking UI — không biết tiến độ indexing** | DocumentUploadQueue FIFO pipeline + granular progress (0-10% parse, 10-20% chunk, 20-95% embed per chunk, 95-100% insert) |
+| **File lỗi không thể retry** | Thêm queue.retry(documentId) — check status=failed, reset, enqueuePriority. SessionFilesPanel có refresh button |
+| **Không có UI quản lý file trong session** | Thêm SessionFilesCubit (watch DB + queue) + SessionFilesPanel (bottom sheet, progress %, retry button, pending badge) |
 
 ---
 
@@ -551,7 +617,11 @@ kGemmaMaxTokens = 2048 (model_constants.dart)
 | TTFT (Time to First Token) | < 2 giây |
 | Token/s | 10-25 token/s |
 | Embedding latency | < 200ms/chunk |
+| Embedding concurrency | FIFO, không race condition |
 | Search latency (10k chunks) | < 100ms |
 | App cold start | < 3 giây |
+| Upload throughput | ~30 chunks/phút (FIFO queue) |
+| Parse PDF 10 trang | < 5 giây |
+| Queue state transition | idle → processing → idle, realtime stream |
 
 Device target: Snapdragon 8 Gen 2, Apple A17 Pro trở lên.

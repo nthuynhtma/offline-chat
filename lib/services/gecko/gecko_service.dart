@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_gemma/flutter_gemma.dart';
 
 import 'package:offline_chat/core/errors/app_exception.dart';
@@ -30,9 +32,16 @@ abstract interface class GeckoService {
 /// Uses `FlutterGemma.getActiveEmbedder()` to obtain the embedding model
 /// (Gecko 110M or EmbeddingGemma), which handles tokenization, inference,
 /// and normalization internally. No raw TFLite [`Interpreter`] needed.
+///
+/// Thread-safe: uses FIFO lock on [embed] and [embedBatch] to prevent
+/// concurrent calls that could cause GPU/OpenCL conflicts or timeouts.
 class GeckoServiceImpl implements GeckoService {
   EmbeddingModel? _embeddingModel;
   bool _registered = false;
+
+  /// FIFO lock: each call waits for the previous call to complete.
+  /// `null` means unlocked.
+  Future<void>? _lock;
 
   @override
   bool get isReady => _embeddingModel != null;
@@ -77,14 +86,16 @@ class GeckoServiceImpl implements GeckoService {
     final model = _embeddingModel;
     if (model == null) throw const ModelNotLoadedException();
 
-    try {
-      return await model.generateEmbedding(
-        text,
-        taskType: TaskType.retrievalQuery,
-      );
-    } catch (e) {
-      throw EmbeddingException('Embedding failed: $e');
-    }
+    return _runLocked(() async {
+      try {
+        return await model.generateEmbedding(
+          text,
+          taskType: TaskType.retrievalQuery,
+        );
+      } catch (e) {
+        throw EmbeddingException('Embedding failed: $e');
+      }
+    });
   }
 
   @override
@@ -92,13 +103,31 @@ class GeckoServiceImpl implements GeckoService {
     final model = _embeddingModel;
     if (model == null) throw const ModelNotLoadedException();
 
+    return _runLocked(() async {
+      try {
+        return await model.generateEmbeddings(
+          texts,
+          taskType: TaskType.retrievalDocument,
+        );
+      } catch (e) {
+        throw EmbeddingException('Embedding batch failed: $e');
+      }
+    });
+  }
+
+  /// Acquire FIFO lock, run [fn], then release.
+  /// All concurrent callers will queue and execute one by one.
+  Future<T> _runLocked<T>(Future<T> Function() fn) async {
+    // Wait for previous lock to complete
+    await _lock;
+
+    final completer = Completer<void>();
+    _lock = completer.future;
+
     try {
-      return await model.generateEmbeddings(
-        texts,
-        taskType: TaskType.retrievalDocument,
-      );
-    } catch (e) {
-      throw EmbeddingException('Embedding batch failed: $e');
+      return await fn();
+    } finally {
+      completer.complete();
     }
   }
 }

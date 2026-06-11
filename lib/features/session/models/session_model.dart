@@ -12,7 +12,7 @@ class SessionModel {
     required this.title,
     required this.createdAt,
     required this.updatedAt,
-    this.knowledgeScope = KnowledgeScope.globalAndSession,
+    this.knowledgeScope = KnowledgeScope.attachedAndGlobal,
   });
 
   factory SessionModel.fromDbRow(dynamic row) => SessionModel(

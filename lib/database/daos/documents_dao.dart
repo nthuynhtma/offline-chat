@@ -34,8 +34,8 @@ class DocumentsDao extends DatabaseAccessor<AppDatabase>
           ..where((d) {
             final condition = switch (scope) {
               KnowledgeScope.globalOnly => d.sessionId.isNull(),
-              KnowledgeScope.sessionOnly => d.sessionId.equals(sessionId ?? ''),
-              KnowledgeScope.globalAndSession => d.sessionId.isNull() |
+              KnowledgeScope.attachedOnly => d.sessionId.equals(sessionId ?? ''),
+              KnowledgeScope.attachedAndGlobal => d.sessionId.isNull() |
                   d.sessionId.equals(sessionId ?? ''),
             };
             return condition;
@@ -86,4 +86,43 @@ class DocumentsDao extends DatabaseAccessor<AppDatabase>
   /// Xoá tất cả documents của một session + cascade chunks.
   Future<void> deleteBySessionId(String sessionId) =>
       (delete(documents)..where((d) => d.sessionId.equals(sessionId))).go();
+
+  // ─── Retry & Progress ─────────────────────────────────────────────────────
+
+  /// Lấy documents có status=failed và retryCount < maxRetries.
+  Future<List<Document>> getDocumentsByRetryNeeded(int maxRetries) async {
+    return (select(documents)
+          ..where((d) =>
+              d.status.equals(IndexStatus.failed.toInt) &
+               d.retryCount.isSmallerThan(Variable(maxRetries)))
+          ..orderBy([(d) => OrderingTerm.desc(d.lastProcessedAt)]))
+        .get();
+  }
+
+  /// Tăng retryCount cho document.
+  Future<void> incrementRetryCount(String docId) async {
+    final doc = await getDocumentById(docId);
+    if (doc == null) return;
+    await (update(documents)..where((d) => d.id.equals(docId)))
+        .write(DocumentsCompanion(
+      retryCount: Value(doc.retryCount + 1),
+    ));
+  }
+
+  /// Reset retryCount về 0 (khi indexing thành công).
+  Future<void> resetRetryCount(String docId) async {
+    await (update(documents)..where((d) => d.id.equals(docId)))
+        .write(DocumentsCompanion(
+      retryCount: const Value(0),
+      lastProcessedAt: Value(DateTime.now()),
+    ));
+  }
+
+  /// Update lastProcessedAt (dùng để tracking lần xử lý cuối).
+  Future<void> updateLastProcessedAt(String docId) async {
+    await (update(documents)..where((d) => d.id.equals(docId)))
+        .write(DocumentsCompanion(
+      lastProcessedAt: Value(DateTime.now()),
+    ));
+  }
 }

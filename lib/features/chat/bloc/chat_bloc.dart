@@ -27,7 +27,7 @@ import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 extension ChatStateScopeX on ChatState {
   KnowledgeScope get knowledgeScope =>
       this is ChatScopeProvider ? (this as ChatScopeProvider).knowledgeScope
-      : KnowledgeScope.globalAndSession;
+      : KnowledgeScope.attachedAndGlobal;
 }
 
 abstract class ChatScopeProvider {
@@ -97,50 +97,60 @@ class ChatLoading extends ChatState {
   const ChatLoading();
 }
 
-class ChatLoaded extends ChatState {
+class ChatLoaded extends ChatState implements ChatScopeProvider {
   final List<MessageModel> messages;
-  const ChatLoaded(this.messages);
+  @override
+  final KnowledgeScope knowledgeScope;
+  const ChatLoaded(this.messages, {this.knowledgeScope = KnowledgeScope.attachedAndGlobal});
 
   @override
-  List<Object?> get props => [messages];
+  List<Object?> get props => [messages, knowledgeScope];
 }
 
-class ChatThinking extends ChatState {
+class ChatThinking extends ChatState implements ChatScopeProvider {
   final List<MessageModel> messages;
-  const ChatThinking(this.messages);
+  @override
+  final KnowledgeScope knowledgeScope;
+  const ChatThinking(this.messages, {this.knowledgeScope = KnowledgeScope.attachedAndGlobal});
 
   @override
-  List<Object?> get props => [messages];
+  List<Object?> get props => [messages, knowledgeScope];
 }
 
-class ChatStreaming extends ChatState {
+class ChatStreaming extends ChatState implements ChatScopeProvider {
   final List<MessageModel> messages;
   final String streamingText;
   final String streamingId;
   final List<SearchResult>? ragResults;
+  @override
+  final KnowledgeScope knowledgeScope;
   const ChatStreaming({
     required this.messages,
     required this.streamingText,
     required this.streamingId,
     this.ragResults,
+    this.knowledgeScope = KnowledgeScope.attachedAndGlobal,
   });
 
   @override
-  List<Object?> get props => [messages, streamingText, streamingId, ragResults];
+  List<Object?> get props => [messages, streamingText, streamingId, ragResults, knowledgeScope];
 }
 
-class ChatError extends ChatState {
+class ChatError extends ChatState implements ChatScopeProvider {
   final String message;
   final bool needsModelDownload;
   final List<MessageModel> messages;
+  @override
+  final KnowledgeScope knowledgeScope;
   const ChatError({
     required this.message,
     this.needsModelDownload = false,
     this.messages = const [],
+    this.knowledgeScope = KnowledgeScope.attachedAndGlobal,
   });
 
   @override
-  List<Object?> get props => [message, needsModelDownload, messages];
+  List<Object?> get props => [message, needsModelDownload, messages, knowledgeScope];
 }
 
 // Bloc
@@ -174,6 +184,9 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
   /// Budget config (tính theo context window runtime).
   late final MemoryBudgetConfig _memoryBudget;
 
+  /// KnowledgeScope hiện tại của session (hydrate từ DB khi init).
+  KnowledgeScope _currentScope = KnowledgeScope.attachedAndGlobal;
+
   ChatBloc({
     required MessageRepository messageRepo,
     required SessionRepository sessionRepo,
@@ -199,6 +212,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     on<StreamingCancelled>(_onStreamingCancelled);
     on<MessagesCleared>(_onMessagesCleared);
     on<ModelBecameReady>(_onModelBecameReady);
+    on<KnowledgeScopeChanged>(_onKnowledgeScopeChanged);
   }
 
   Future<void> _onSessionInitialized(
@@ -212,6 +226,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       final messages = await _messageRepo.getMessages(event.sessionId);
       _currentMessages = messages;
 
+      // Hydrate KnowledgeScope từ DB
+      final sessionInfo = await _sessionRepo.getSessionById(event.sessionId);
+      _currentScope = sessionInfo?.knowledgeScope ?? KnowledgeScope.attachedAndGlobal;
+
       // Kiểm tra xem có SessionMemory (summary) không
       final memoryRow = await _memoryStore.getSessionMemory(event.sessionId);
 
@@ -219,7 +237,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         // Có summary → inject vào system instruction + replay recent messages
         if (!_gemmaService.isReady) {
           log_util.log.w('⚠️ [Session] Gemma chưa ready — skip session creation, load messages only');
-          emit(ChatLoaded(messages));
+          emit(ChatLoaded(messages, knowledgeScope: _currentScope));
           return;
         }
         final userMemories = await _memoryStore.getAllUserMemories();
@@ -261,9 +279,12 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         await _createGemmaSessionWithHistory(messages);
       }
 
-      emit(ChatLoaded(messages));
+      emit(ChatLoaded(messages, knowledgeScope: _currentScope));
     } catch (e) {
-      emit(ChatError(message: e.toString()));
+      emit(ChatError(
+        message: e.toString(),
+        knowledgeScope: _currentScope,
+      ));
     }
   }
 
@@ -324,6 +345,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             message: 'Model AI chưa được tải. Vui lòng tải model trước.',
             needsModelDownload: true,
             messages: _currentMessages,
+            knowledgeScope: _currentScope,
           ));
           return;
         }
@@ -352,7 +374,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         userMsg,
       ];
       _currentMessages = currentMessages;
-      emit(ChatThinking(currentMessages));
+      emit(ChatThinking(currentMessages, knowledgeScope: _currentScope));
 
       // ─── 2. RAG retrieval via RagService ─────────────────────────────
       // Tính token budget động cho RAG
@@ -386,7 +408,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
       // Load KnowledgeScope từ session
       final sessionInfo = await _sessionRepo.getSessionById(_currentSessionId!);
-      final scope = sessionInfo?.knowledgeScope ?? KnowledgeScope.globalAndSession;
+      final scope = sessionInfo?.knowledgeScope ?? KnowledgeScope.attachedAndGlobal;
 
       final ragContext = await _ragService.retrieve(
         query: event.content,
@@ -433,6 +455,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             streamingText: _accumulatedText,
             streamingId: assistantMsgId,
             ragResults: ragContext.hasContext ? ragContext.chunks : null,
+            knowledgeScope: _currentScope,
           );
         },
         onError: (error, _) {
@@ -442,6 +465,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           return ChatError(
             message: error.toString(),
             messages: currentMessages,
+            knowledgeScope: _currentScope,
           );
         },
       );
@@ -465,7 +489,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         // ─── Auto-summary trigger ──────────────────────────────────
         _tryTriggerAutoSummary();
 
-        emit(ChatLoaded(finalMessages));
+        emit(ChatLoaded(finalMessages, knowledgeScope: _currentScope));
       } else {
         log_util.log.w('⚠️ [SendMessage] Response rỗng hoặc có lỗi — không lưu assistant message');
       }
@@ -477,11 +501,13 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           message: e.message,
           needsModelDownload: true,
           messages: _currentMessages,
+          knowledgeScope: _currentScope,
         ));
       } else {
         emit(ChatError(
           message: e.toString(),
           messages: _currentMessages,
+          knowledgeScope: _currentScope,
         ));
       }
     }
@@ -499,7 +525,38 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
     // Nếu đang ở trạng thái error hoặc loading do model chưa ready → chuyển về loaded
     if (state is ChatError || state is ChatLoading) {
-      emit(ChatLoaded(_currentMessages));
+      emit(ChatLoaded(_currentMessages, knowledgeScope: _currentScope));
+    }
+  }
+
+  Future<void> _onKnowledgeScopeChanged(
+    KnowledgeScopeChanged event,
+    Emitter<ChatState> emit,
+  ) async {
+    if (isClosed) return;
+    if (_currentSessionId == null) return;
+
+    _currentScope = event.scope;
+
+    try {
+      await _sessionRepo.updateKnowledgeScope(_currentSessionId!, event.scope);
+      log_util.log.i('🎯 [KnowledgeScope] Updated to ${event.scope.name} for session $_currentSessionId');
+
+      // Nếu đang ở loaded/error → emit lại state với scope mới
+      if (state is ChatLoaded) {
+        final loaded = state as ChatLoaded;
+        emit(ChatLoaded(loaded.messages, knowledgeScope: _currentScope));
+      } else if (state is ChatError) {
+        final err = state as ChatError;
+        emit(ChatError(
+          message: err.message,
+          needsModelDownload: err.needsModelDownload,
+          messages: err.messages,
+          knowledgeScope: _currentScope,
+        ));
+      }
+    } catch (e) {
+      log_util.log.e('❌ [KnowledgeScope] Lỗi update: $e');
     }
   }
 
@@ -529,7 +586,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         ];
         _currentMessages = finalMessages;
         _accumulatedText = '';
-        emit(ChatLoaded(finalMessages));
+        emit(ChatLoaded(finalMessages, knowledgeScope: _currentScope));
         return;
       } catch (_) {
         // Nếu lưu DB thất bại, vẫn trả về UI bình thường
@@ -537,7 +594,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     }
 
     _accumulatedText = '';
-    emit(ChatLoaded(streamingState.messages));
+    emit(ChatLoaded(streamingState.messages, knowledgeScope: _currentScope));
   }
 
   Future<void> _onMessagesCleared(
@@ -551,9 +608,9 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     try {
       await _messageRepo.deleteMessagesBySession(_currentSessionId!);
       _currentMessages = [];
-      emit(const ChatLoaded([]));
+      emit(ChatLoaded([], knowledgeScope: _currentScope));
     } catch (e) {
-      emit(ChatError(message: e.toString(), messages: _currentMessages));
+      emit(ChatError(message: e.toString(), messages: _currentMessages, knowledgeScope: _currentScope));
     }
   }
 

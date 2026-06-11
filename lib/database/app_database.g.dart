@@ -708,6 +708,20 @@ class $DocumentsTable extends Documents
   late final GeneratedColumn<String> errorMessage = GeneratedColumn<String>(
       'error_message', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _retryCountMeta =
+      const VerificationMeta('retryCount');
+  @override
+  late final GeneratedColumn<int> retryCount = GeneratedColumn<int>(
+      'retry_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _lastProcessedAtMeta =
+      const VerificationMeta('lastProcessedAt');
+  @override
+  late final GeneratedColumn<DateTime> lastProcessedAt =
+      GeneratedColumn<DateTime>('last_processed_at', aliasedName, true,
+          type: DriftSqlType.dateTime, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -720,7 +734,9 @@ class $DocumentsTable extends Documents
         sessionId,
         status,
         progress,
-        errorMessage
+        errorMessage,
+        retryCount,
+        lastProcessedAt
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -791,6 +807,18 @@ class $DocumentsTable extends Documents
           errorMessage.isAcceptableOrUnknown(
               data['error_message']!, _errorMessageMeta));
     }
+    if (data.containsKey('retry_count')) {
+      context.handle(
+          _retryCountMeta,
+          retryCount.isAcceptableOrUnknown(
+              data['retry_count']!, _retryCountMeta));
+    }
+    if (data.containsKey('last_processed_at')) {
+      context.handle(
+          _lastProcessedAtMeta,
+          lastProcessedAt.isAcceptableOrUnknown(
+              data['last_processed_at']!, _lastProcessedAtMeta));
+    }
     return context;
   }
 
@@ -822,6 +850,10 @@ class $DocumentsTable extends Documents
           .read(DriftSqlType.double, data['${effectivePrefix}progress'])!,
       errorMessage: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}error_message']),
+      retryCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}retry_count'])!,
+      lastProcessedAt: attachedDatabase.typeMapping.read(
+          DriftSqlType.dateTime, data['${effectivePrefix}last_processed_at']),
     );
   }
 
@@ -851,6 +883,12 @@ class Document extends DataClass implements Insertable<Document> {
 
   /// Thông báo lỗi nếu status=failed
   final String? errorMessage;
+
+  /// Số lần retry indexing (reset khi indexing thành công)
+  final int retryCount;
+
+  /// Thời gian xử lý lần cuối (null nếu chưa từng xử lý)
+  final DateTime? lastProcessedAt;
   const Document(
       {required this.id,
       required this.name,
@@ -862,7 +900,9 @@ class Document extends DataClass implements Insertable<Document> {
       this.sessionId,
       required this.status,
       required this.progress,
-      this.errorMessage});
+      this.errorMessage,
+      required this.retryCount,
+      this.lastProcessedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -880,6 +920,10 @@ class Document extends DataClass implements Insertable<Document> {
     map['progress'] = Variable<double>(progress);
     if (!nullToAbsent || errorMessage != null) {
       map['error_message'] = Variable<String>(errorMessage);
+    }
+    map['retry_count'] = Variable<int>(retryCount);
+    if (!nullToAbsent || lastProcessedAt != null) {
+      map['last_processed_at'] = Variable<DateTime>(lastProcessedAt);
     }
     return map;
   }
@@ -901,6 +945,10 @@ class Document extends DataClass implements Insertable<Document> {
       errorMessage: errorMessage == null && nullToAbsent
           ? const Value.absent()
           : Value(errorMessage),
+      retryCount: Value(retryCount),
+      lastProcessedAt: lastProcessedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastProcessedAt),
     );
   }
 
@@ -919,6 +967,8 @@ class Document extends DataClass implements Insertable<Document> {
       status: serializer.fromJson<int>(json['status']),
       progress: serializer.fromJson<double>(json['progress']),
       errorMessage: serializer.fromJson<String?>(json['errorMessage']),
+      retryCount: serializer.fromJson<int>(json['retryCount']),
+      lastProcessedAt: serializer.fromJson<DateTime?>(json['lastProcessedAt']),
     );
   }
   @override
@@ -936,6 +986,8 @@ class Document extends DataClass implements Insertable<Document> {
       'status': serializer.toJson<int>(status),
       'progress': serializer.toJson<double>(progress),
       'errorMessage': serializer.toJson<String?>(errorMessage),
+      'retryCount': serializer.toJson<int>(retryCount),
+      'lastProcessedAt': serializer.toJson<DateTime?>(lastProcessedAt),
     };
   }
 
@@ -950,7 +1002,9 @@ class Document extends DataClass implements Insertable<Document> {
           Value<String?> sessionId = const Value.absent(),
           int? status,
           double? progress,
-          Value<String?> errorMessage = const Value.absent()}) =>
+          Value<String?> errorMessage = const Value.absent(),
+          int? retryCount,
+          Value<DateTime?> lastProcessedAt = const Value.absent()}) =>
       Document(
         id: id ?? this.id,
         name: name ?? this.name,
@@ -964,6 +1018,10 @@ class Document extends DataClass implements Insertable<Document> {
         progress: progress ?? this.progress,
         errorMessage:
             errorMessage.present ? errorMessage.value : this.errorMessage,
+        retryCount: retryCount ?? this.retryCount,
+        lastProcessedAt: lastProcessedAt.present
+            ? lastProcessedAt.value
+            : this.lastProcessedAt,
       );
   Document copyWithCompanion(DocumentsCompanion data) {
     return Document(
@@ -981,6 +1039,11 @@ class Document extends DataClass implements Insertable<Document> {
       errorMessage: data.errorMessage.present
           ? data.errorMessage.value
           : this.errorMessage,
+      retryCount:
+          data.retryCount.present ? data.retryCount.value : this.retryCount,
+      lastProcessedAt: data.lastProcessedAt.present
+          ? data.lastProcessedAt.value
+          : this.lastProcessedAt,
     );
   }
 
@@ -997,14 +1060,28 @@ class Document extends DataClass implements Insertable<Document> {
           ..write('sessionId: $sessionId, ')
           ..write('status: $status, ')
           ..write('progress: $progress, ')
-          ..write('errorMessage: $errorMessage')
+          ..write('errorMessage: $errorMessage, ')
+          ..write('retryCount: $retryCount, ')
+          ..write('lastProcessedAt: $lastProcessedAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(id, name, path, sizeBytes, chunkCount,
-      mimeType, createdAt, sessionId, status, progress, errorMessage);
+  int get hashCode => Object.hash(
+      id,
+      name,
+      path,
+      sizeBytes,
+      chunkCount,
+      mimeType,
+      createdAt,
+      sessionId,
+      status,
+      progress,
+      errorMessage,
+      retryCount,
+      lastProcessedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1019,7 +1096,9 @@ class Document extends DataClass implements Insertable<Document> {
           other.sessionId == this.sessionId &&
           other.status == this.status &&
           other.progress == this.progress &&
-          other.errorMessage == this.errorMessage);
+          other.errorMessage == this.errorMessage &&
+          other.retryCount == this.retryCount &&
+          other.lastProcessedAt == this.lastProcessedAt);
 }
 
 class DocumentsCompanion extends UpdateCompanion<Document> {
@@ -1034,6 +1113,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
   final Value<int> status;
   final Value<double> progress;
   final Value<String?> errorMessage;
+  final Value<int> retryCount;
+  final Value<DateTime?> lastProcessedAt;
   final Value<int> rowid;
   const DocumentsCompanion({
     this.id = const Value.absent(),
@@ -1047,6 +1128,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     this.status = const Value.absent(),
     this.progress = const Value.absent(),
     this.errorMessage = const Value.absent(),
+    this.retryCount = const Value.absent(),
+    this.lastProcessedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DocumentsCompanion.insert({
@@ -1061,6 +1144,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     this.status = const Value.absent(),
     this.progress = const Value.absent(),
     this.errorMessage = const Value.absent(),
+    this.retryCount = const Value.absent(),
+    this.lastProcessedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name),
@@ -1080,6 +1165,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     Expression<int>? status,
     Expression<double>? progress,
     Expression<String>? errorMessage,
+    Expression<int>? retryCount,
+    Expression<DateTime>? lastProcessedAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1094,6 +1181,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       if (status != null) 'status': status,
       if (progress != null) 'progress': progress,
       if (errorMessage != null) 'error_message': errorMessage,
+      if (retryCount != null) 'retry_count': retryCount,
+      if (lastProcessedAt != null) 'last_processed_at': lastProcessedAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1110,6 +1199,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       Value<int>? status,
       Value<double>? progress,
       Value<String?>? errorMessage,
+      Value<int>? retryCount,
+      Value<DateTime?>? lastProcessedAt,
       Value<int>? rowid}) {
     return DocumentsCompanion(
       id: id ?? this.id,
@@ -1123,6 +1214,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
       status: status ?? this.status,
       progress: progress ?? this.progress,
       errorMessage: errorMessage ?? this.errorMessage,
+      retryCount: retryCount ?? this.retryCount,
+      lastProcessedAt: lastProcessedAt ?? this.lastProcessedAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1163,6 +1256,12 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
     if (errorMessage.present) {
       map['error_message'] = Variable<String>(errorMessage.value);
     }
+    if (retryCount.present) {
+      map['retry_count'] = Variable<int>(retryCount.value);
+    }
+    if (lastProcessedAt.present) {
+      map['last_processed_at'] = Variable<DateTime>(lastProcessedAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1183,6 +1282,8 @@ class DocumentsCompanion extends UpdateCompanion<Document> {
           ..write('status: $status, ')
           ..write('progress: $progress, ')
           ..write('errorMessage: $errorMessage, ')
+          ..write('retryCount: $retryCount, ')
+          ..write('lastProcessedAt: $lastProcessedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2494,6 +2595,298 @@ class UserMemoryCompanion extends UpdateCompanion<UserMemoryData> {
   }
 }
 
+class $SessionDocumentRefsTable extends SessionDocumentRefs
+    with TableInfo<$SessionDocumentRefsTable, SessionDocumentRef> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SessionDocumentRefsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sessionIdMeta =
+      const VerificationMeta('sessionId');
+  @override
+  late final GeneratedColumn<String> sessionId = GeneratedColumn<String>(
+      'session_id', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: true,
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES sessions (id) ON DELETE CASCADE'));
+  static const VerificationMeta _documentIdMeta =
+      const VerificationMeta('documentId');
+  @override
+  late final GeneratedColumn<String> documentId = GeneratedColumn<String>(
+      'document_id', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: true,
+      defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'REFERENCES documents (id) ON DELETE CASCADE'));
+  static const VerificationMeta _attachedAtMeta =
+      const VerificationMeta('attachedAt');
+  @override
+  late final GeneratedColumn<DateTime> attachedAt = GeneratedColumn<DateTime>(
+      'attached_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _displayOrderMeta =
+      const VerificationMeta('displayOrder');
+  @override
+  late final GeneratedColumn<int> displayOrder = GeneratedColumn<int>(
+      'display_order', aliasedName, false,
+      type: DriftSqlType.int, requiredDuringInsert: true);
+  @override
+  List<GeneratedColumn> get $columns =>
+      [sessionId, documentId, attachedAt, displayOrder];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'session_document_refs';
+  @override
+  VerificationContext validateIntegrity(Insertable<SessionDocumentRef> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('session_id')) {
+      context.handle(_sessionIdMeta,
+          sessionId.isAcceptableOrUnknown(data['session_id']!, _sessionIdMeta));
+    } else if (isInserting) {
+      context.missing(_sessionIdMeta);
+    }
+    if (data.containsKey('document_id')) {
+      context.handle(
+          _documentIdMeta,
+          documentId.isAcceptableOrUnknown(
+              data['document_id']!, _documentIdMeta));
+    } else if (isInserting) {
+      context.missing(_documentIdMeta);
+    }
+    if (data.containsKey('attached_at')) {
+      context.handle(
+          _attachedAtMeta,
+          attachedAt.isAcceptableOrUnknown(
+              data['attached_at']!, _attachedAtMeta));
+    } else if (isInserting) {
+      context.missing(_attachedAtMeta);
+    }
+    if (data.containsKey('display_order')) {
+      context.handle(
+          _displayOrderMeta,
+          displayOrder.isAcceptableOrUnknown(
+              data['display_order']!, _displayOrderMeta));
+    } else if (isInserting) {
+      context.missing(_displayOrderMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {sessionId, documentId};
+  @override
+  SessionDocumentRef map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SessionDocumentRef(
+      sessionId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}session_id'])!,
+      documentId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}document_id'])!,
+      attachedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}attached_at'])!,
+      displayOrder: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}display_order'])!,
+    );
+  }
+
+  @override
+  $SessionDocumentRefsTable createAlias(String alias) {
+    return $SessionDocumentRefsTable(attachedDatabase, alias);
+  }
+}
+
+class SessionDocumentRef extends DataClass
+    implements Insertable<SessionDocumentRef> {
+  final String sessionId;
+  final String documentId;
+  final DateTime attachedAt;
+  final int displayOrder;
+  const SessionDocumentRef(
+      {required this.sessionId,
+      required this.documentId,
+      required this.attachedAt,
+      required this.displayOrder});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['session_id'] = Variable<String>(sessionId);
+    map['document_id'] = Variable<String>(documentId);
+    map['attached_at'] = Variable<DateTime>(attachedAt);
+    map['display_order'] = Variable<int>(displayOrder);
+    return map;
+  }
+
+  SessionDocumentRefsCompanion toCompanion(bool nullToAbsent) {
+    return SessionDocumentRefsCompanion(
+      sessionId: Value(sessionId),
+      documentId: Value(documentId),
+      attachedAt: Value(attachedAt),
+      displayOrder: Value(displayOrder),
+    );
+  }
+
+  factory SessionDocumentRef.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SessionDocumentRef(
+      sessionId: serializer.fromJson<String>(json['sessionId']),
+      documentId: serializer.fromJson<String>(json['documentId']),
+      attachedAt: serializer.fromJson<DateTime>(json['attachedAt']),
+      displayOrder: serializer.fromJson<int>(json['displayOrder']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'sessionId': serializer.toJson<String>(sessionId),
+      'documentId': serializer.toJson<String>(documentId),
+      'attachedAt': serializer.toJson<DateTime>(attachedAt),
+      'displayOrder': serializer.toJson<int>(displayOrder),
+    };
+  }
+
+  SessionDocumentRef copyWith(
+          {String? sessionId,
+          String? documentId,
+          DateTime? attachedAt,
+          int? displayOrder}) =>
+      SessionDocumentRef(
+        sessionId: sessionId ?? this.sessionId,
+        documentId: documentId ?? this.documentId,
+        attachedAt: attachedAt ?? this.attachedAt,
+        displayOrder: displayOrder ?? this.displayOrder,
+      );
+  SessionDocumentRef copyWithCompanion(SessionDocumentRefsCompanion data) {
+    return SessionDocumentRef(
+      sessionId: data.sessionId.present ? data.sessionId.value : this.sessionId,
+      documentId:
+          data.documentId.present ? data.documentId.value : this.documentId,
+      attachedAt:
+          data.attachedAt.present ? data.attachedAt.value : this.attachedAt,
+      displayOrder: data.displayOrder.present
+          ? data.displayOrder.value
+          : this.displayOrder,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionDocumentRef(')
+          ..write('sessionId: $sessionId, ')
+          ..write('documentId: $documentId, ')
+          ..write('attachedAt: $attachedAt, ')
+          ..write('displayOrder: $displayOrder')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(sessionId, documentId, attachedAt, displayOrder);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SessionDocumentRef &&
+          other.sessionId == this.sessionId &&
+          other.documentId == this.documentId &&
+          other.attachedAt == this.attachedAt &&
+          other.displayOrder == this.displayOrder);
+}
+
+class SessionDocumentRefsCompanion extends UpdateCompanion<SessionDocumentRef> {
+  final Value<String> sessionId;
+  final Value<String> documentId;
+  final Value<DateTime> attachedAt;
+  final Value<int> displayOrder;
+  final Value<int> rowid;
+  const SessionDocumentRefsCompanion({
+    this.sessionId = const Value.absent(),
+    this.documentId = const Value.absent(),
+    this.attachedAt = const Value.absent(),
+    this.displayOrder = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SessionDocumentRefsCompanion.insert({
+    required String sessionId,
+    required String documentId,
+    required DateTime attachedAt,
+    required int displayOrder,
+    this.rowid = const Value.absent(),
+  })  : sessionId = Value(sessionId),
+        documentId = Value(documentId),
+        attachedAt = Value(attachedAt),
+        displayOrder = Value(displayOrder);
+  static Insertable<SessionDocumentRef> custom({
+    Expression<String>? sessionId,
+    Expression<String>? documentId,
+    Expression<DateTime>? attachedAt,
+    Expression<int>? displayOrder,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (sessionId != null) 'session_id': sessionId,
+      if (documentId != null) 'document_id': documentId,
+      if (attachedAt != null) 'attached_at': attachedAt,
+      if (displayOrder != null) 'display_order': displayOrder,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SessionDocumentRefsCompanion copyWith(
+      {Value<String>? sessionId,
+      Value<String>? documentId,
+      Value<DateTime>? attachedAt,
+      Value<int>? displayOrder,
+      Value<int>? rowid}) {
+    return SessionDocumentRefsCompanion(
+      sessionId: sessionId ?? this.sessionId,
+      documentId: documentId ?? this.documentId,
+      attachedAt: attachedAt ?? this.attachedAt,
+      displayOrder: displayOrder ?? this.displayOrder,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (sessionId.present) {
+      map['session_id'] = Variable<String>(sessionId.value);
+    }
+    if (documentId.present) {
+      map['document_id'] = Variable<String>(documentId.value);
+    }
+    if (attachedAt.present) {
+      map['attached_at'] = Variable<DateTime>(attachedAt.value);
+    }
+    if (displayOrder.present) {
+      map['display_order'] = Variable<int>(displayOrder.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SessionDocumentRefsCompanion(')
+          ..write('sessionId: $sessionId, ')
+          ..write('documentId: $documentId, ')
+          ..write('attachedAt: $attachedAt, ')
+          ..write('displayOrder: $displayOrder, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2504,6 +2897,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $VectorsTable vectors = $VectorsTable(this);
   late final $SessionMemoryTable sessionMemory = $SessionMemoryTable(this);
   late final $UserMemoryTable userMemory = $UserMemoryTable(this);
+  late final $SessionDocumentRefsTable sessionDocumentRefs =
+      $SessionDocumentRefsTable(this);
   late final SessionsDao sessionsDao = SessionsDao(this as AppDatabase);
   late final MessagesDao messagesDao = MessagesDao(this as AppDatabase);
   late final DocumentsDao documentsDao = DocumentsDao(this as AppDatabase);
@@ -2512,6 +2907,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final SessionMemoryDao sessionMemoryDao =
       SessionMemoryDao(this as AppDatabase);
   late final UserMemoryDao userMemoryDao = UserMemoryDao(this as AppDatabase);
+  late final SessionDocumentRefsDao sessionDocumentRefsDao =
+      SessionDocumentRefsDao(this as AppDatabase);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2523,7 +2920,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         chunks,
         vectors,
         sessionMemory,
-        userMemory
+        userMemory,
+        sessionDocumentRefs
       ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules(
@@ -2561,6 +2959,20 @@ abstract class _$AppDatabase extends GeneratedDatabase {
                 limitUpdateKind: UpdateKind.update),
             result: [
               TableUpdate('session_memory', kind: UpdateKind.update),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('sessions',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('session_document_refs', kind: UpdateKind.delete),
+            ],
+          ),
+          WritePropagation(
+            on: TableUpdateQuery.onTableName('documents',
+                limitUpdateKind: UpdateKind.delete),
+            result: [
+              TableUpdate('session_document_refs', kind: UpdateKind.delete),
             ],
           ),
         ],
@@ -2629,6 +3041,24 @@ final class $$SessionsTableReferences
         .filter((f) => f.sessionId.id.sqlEquals($_itemColumn<String>('id')!));
 
     final cache = $_typedResult.readTableOrNull(_sessionMemoryRefsTable($_db));
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: cache));
+  }
+
+  static MultiTypedResultKey<$SessionDocumentRefsTable,
+      List<SessionDocumentRef>> _sessionDocumentRefsRefsTable(
+          _$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(db.sessionDocumentRefs,
+          aliasName: $_aliasNameGenerator(
+              db.sessions.id, db.sessionDocumentRefs.sessionId));
+
+  $$SessionDocumentRefsTableProcessedTableManager get sessionDocumentRefsRefs {
+    final manager = $$SessionDocumentRefsTableTableManager(
+            $_db, $_db.sessionDocumentRefs)
+        .filter((f) => f.sessionId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache =
+        $_typedResult.readTableOrNull(_sessionDocumentRefsRefsTable($_db));
     return ProcessedTableManager(
         manager.$state.copyWith(prefetchedData: cache));
   }
@@ -2714,6 +3144,27 @@ class $$SessionsTableFilterComposer
             $$SessionMemoryTableFilterComposer(
               $db: $db,
               $table: $db.sessionMemory,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
+
+  Expression<bool> sessionDocumentRefsRefs(
+      Expression<bool> Function($$SessionDocumentRefsTableFilterComposer f) f) {
+    final $$SessionDocumentRefsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.sessionDocumentRefs,
+        getReferencedColumn: (t) => t.sessionId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionDocumentRefsTableFilterComposer(
+              $db: $db,
+              $table: $db.sessionDocumentRefs,
               $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
               joinBuilder: joinBuilder,
               $removeJoinBuilderFromRootComposer:
@@ -2835,6 +3286,29 @@ class $$SessionsTableAnnotationComposer
             ));
     return f(composer);
   }
+
+  Expression<T> sessionDocumentRefsRefs<T extends Object>(
+      Expression<T> Function($$SessionDocumentRefsTableAnnotationComposer a)
+          f) {
+    final $$SessionDocumentRefsTableAnnotationComposer composer =
+        $composerBuilder(
+            composer: this,
+            getCurrentColumn: (t) => t.id,
+            referencedTable: $db.sessionDocumentRefs,
+            getReferencedColumn: (t) => t.sessionId,
+            builder: (joinBuilder,
+                    {$addJoinBuilderToRootComposer,
+                    $removeJoinBuilderFromRootComposer}) =>
+                $$SessionDocumentRefsTableAnnotationComposer(
+                  $db: $db,
+                  $table: $db.sessionDocumentRefs,
+                  $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                  joinBuilder: joinBuilder,
+                  $removeJoinBuilderFromRootComposer:
+                      $removeJoinBuilderFromRootComposer,
+                ));
+    return f(composer);
+  }
 }
 
 class $$SessionsTableTableManager extends RootTableManager<
@@ -2849,7 +3323,10 @@ class $$SessionsTableTableManager extends RootTableManager<
     (Session, $$SessionsTableReferences),
     Session,
     PrefetchHooks Function(
-        {bool messagesRefs, bool documentsRefs, bool sessionMemoryRefs})> {
+        {bool messagesRefs,
+        bool documentsRefs,
+        bool sessionMemoryRefs,
+        bool sessionDocumentRefsRefs})> {
   $$SessionsTableTableManager(_$AppDatabase db, $SessionsTable table)
       : super(TableManagerState(
           db: db,
@@ -2899,13 +3376,15 @@ class $$SessionsTableTableManager extends RootTableManager<
           prefetchHooksCallback: (
               {messagesRefs = false,
               documentsRefs = false,
-              sessionMemoryRefs = false}) {
+              sessionMemoryRefs = false,
+              sessionDocumentRefsRefs = false}) {
             return PrefetchHooks(
               db: db,
               explicitlyWatchedTables: [
                 if (messagesRefs) db.messages,
                 if (documentsRefs) db.documents,
-                if (sessionMemoryRefs) db.sessionMemory
+                if (sessionMemoryRefs) db.sessionMemory,
+                if (sessionDocumentRefsRefs) db.sessionDocumentRefs
               ],
               addJoins: null,
               getPrefetchedDataCallback: (items) async {
@@ -2947,6 +3426,19 @@ class $$SessionsTableTableManager extends RootTableManager<
                         referencedItemsForCurrentItem:
                             (item, referencedItems) => referencedItems
                                 .where((e) => e.sessionId == item.id),
+                        typedResults: items),
+                  if (sessionDocumentRefsRefs)
+                    await $_getPrefetchedData<Session, $SessionsTable,
+                            SessionDocumentRef>(
+                        currentTable: table,
+                        referencedTable: $$SessionsTableReferences
+                            ._sessionDocumentRefsRefsTable(db),
+                        managerFromTypedResult: (p0) =>
+                            $$SessionsTableReferences(db, table, p0)
+                                .sessionDocumentRefsRefs,
+                        referencedItemsForCurrentItem:
+                            (item, referencedItems) => referencedItems
+                                .where((e) => e.sessionId == item.id),
                         typedResults: items)
                 ];
               },
@@ -2967,7 +3459,10 @@ typedef $$SessionsTableProcessedTableManager = ProcessedTableManager<
     (Session, $$SessionsTableReferences),
     Session,
     PrefetchHooks Function(
-        {bool messagesRefs, bool documentsRefs, bool sessionMemoryRefs})>;
+        {bool messagesRefs,
+        bool documentsRefs,
+        bool sessionMemoryRefs,
+        bool sessionDocumentRefsRefs})>;
 typedef $$MessagesTableCreateCompanionBuilder = MessagesCompanion Function({
   required String id,
   required String sessionId,
@@ -3252,6 +3747,8 @@ typedef $$DocumentsTableCreateCompanionBuilder = DocumentsCompanion Function({
   Value<int> status,
   Value<double> progress,
   Value<String?> errorMessage,
+  Value<int> retryCount,
+  Value<DateTime?> lastProcessedAt,
   Value<int> rowid,
 });
 typedef $$DocumentsTableUpdateCompanionBuilder = DocumentsCompanion Function({
@@ -3266,6 +3763,8 @@ typedef $$DocumentsTableUpdateCompanionBuilder = DocumentsCompanion Function({
   Value<int> status,
   Value<double> progress,
   Value<String?> errorMessage,
+  Value<int> retryCount,
+  Value<DateTime?> lastProcessedAt,
   Value<int> rowid,
 });
 
@@ -3299,6 +3798,24 @@ final class $$DocumentsTableReferences
         .filter((f) => f.documentId.id.sqlEquals($_itemColumn<String>('id')!));
 
     final cache = $_typedResult.readTableOrNull(_chunksRefsTable($_db));
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: cache));
+  }
+
+  static MultiTypedResultKey<$SessionDocumentRefsTable,
+      List<SessionDocumentRef>> _sessionDocumentRefsRefsTable(
+          _$AppDatabase db) =>
+      MultiTypedResultKey.fromTable(db.sessionDocumentRefs,
+          aliasName: $_aliasNameGenerator(
+              db.documents.id, db.sessionDocumentRefs.documentId));
+
+  $$SessionDocumentRefsTableProcessedTableManager get sessionDocumentRefsRefs {
+    final manager = $$SessionDocumentRefsTableTableManager(
+            $_db, $_db.sessionDocumentRefs)
+        .filter((f) => f.documentId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache =
+        $_typedResult.readTableOrNull(_sessionDocumentRefsRefsTable($_db));
     return ProcessedTableManager(
         manager.$state.copyWith(prefetchedData: cache));
   }
@@ -3343,6 +3860,13 @@ class $$DocumentsTableFilterComposer
   ColumnFilters<String> get errorMessage => $composableBuilder(
       column: $table.errorMessage, builder: (column) => ColumnFilters(column));
 
+  ColumnFilters<int> get retryCount => $composableBuilder(
+      column: $table.retryCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get lastProcessedAt => $composableBuilder(
+      column: $table.lastProcessedAt,
+      builder: (column) => ColumnFilters(column));
+
   $$SessionsTableFilterComposer get sessionId {
     final $$SessionsTableFilterComposer composer = $composerBuilder(
         composer: this,
@@ -3376,6 +3900,27 @@ class $$DocumentsTableFilterComposer
             $$ChunksTableFilterComposer(
               $db: $db,
               $table: $db.chunks,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return f(composer);
+  }
+
+  Expression<bool> sessionDocumentRefsRefs(
+      Expression<bool> Function($$SessionDocumentRefsTableFilterComposer f) f) {
+    final $$SessionDocumentRefsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.id,
+        referencedTable: $db.sessionDocumentRefs,
+        getReferencedColumn: (t) => t.documentId,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionDocumentRefsTableFilterComposer(
+              $db: $db,
+              $table: $db.sessionDocumentRefs,
               $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
               joinBuilder: joinBuilder,
               $removeJoinBuilderFromRootComposer:
@@ -3423,6 +3968,13 @@ class $$DocumentsTableOrderingComposer
 
   ColumnOrderings<String> get errorMessage => $composableBuilder(
       column: $table.errorMessage,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get retryCount => $composableBuilder(
+      column: $table.retryCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get lastProcessedAt => $composableBuilder(
+      column: $table.lastProcessedAt,
       builder: (column) => ColumnOrderings(column));
 
   $$SessionsTableOrderingComposer get sessionId {
@@ -3485,6 +4037,12 @@ class $$DocumentsTableAnnotationComposer
   GeneratedColumn<String> get errorMessage => $composableBuilder(
       column: $table.errorMessage, builder: (column) => column);
 
+  GeneratedColumn<int> get retryCount => $composableBuilder(
+      column: $table.retryCount, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get lastProcessedAt => $composableBuilder(
+      column: $table.lastProcessedAt, builder: (column) => column);
+
   $$SessionsTableAnnotationComposer get sessionId {
     final $$SessionsTableAnnotationComposer composer = $composerBuilder(
         composer: this,
@@ -3525,6 +4083,29 @@ class $$DocumentsTableAnnotationComposer
             ));
     return f(composer);
   }
+
+  Expression<T> sessionDocumentRefsRefs<T extends Object>(
+      Expression<T> Function($$SessionDocumentRefsTableAnnotationComposer a)
+          f) {
+    final $$SessionDocumentRefsTableAnnotationComposer composer =
+        $composerBuilder(
+            composer: this,
+            getCurrentColumn: (t) => t.id,
+            referencedTable: $db.sessionDocumentRefs,
+            getReferencedColumn: (t) => t.documentId,
+            builder: (joinBuilder,
+                    {$addJoinBuilderToRootComposer,
+                    $removeJoinBuilderFromRootComposer}) =>
+                $$SessionDocumentRefsTableAnnotationComposer(
+                  $db: $db,
+                  $table: $db.sessionDocumentRefs,
+                  $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                  joinBuilder: joinBuilder,
+                  $removeJoinBuilderFromRootComposer:
+                      $removeJoinBuilderFromRootComposer,
+                ));
+    return f(composer);
+  }
 }
 
 class $$DocumentsTableTableManager extends RootTableManager<
@@ -3538,7 +4119,8 @@ class $$DocumentsTableTableManager extends RootTableManager<
     $$DocumentsTableUpdateCompanionBuilder,
     (Document, $$DocumentsTableReferences),
     Document,
-    PrefetchHooks Function({bool sessionId, bool chunksRefs})> {
+    PrefetchHooks Function(
+        {bool sessionId, bool chunksRefs, bool sessionDocumentRefsRefs})> {
   $$DocumentsTableTableManager(_$AppDatabase db, $DocumentsTable table)
       : super(TableManagerState(
           db: db,
@@ -3561,6 +4143,8 @@ class $$DocumentsTableTableManager extends RootTableManager<
             Value<int> status = const Value.absent(),
             Value<double> progress = const Value.absent(),
             Value<String?> errorMessage = const Value.absent(),
+            Value<int> retryCount = const Value.absent(),
+            Value<DateTime?> lastProcessedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DocumentsCompanion(
@@ -3575,6 +4159,8 @@ class $$DocumentsTableTableManager extends RootTableManager<
             status: status,
             progress: progress,
             errorMessage: errorMessage,
+            retryCount: retryCount,
+            lastProcessedAt: lastProcessedAt,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3589,6 +4175,8 @@ class $$DocumentsTableTableManager extends RootTableManager<
             Value<int> status = const Value.absent(),
             Value<double> progress = const Value.absent(),
             Value<String?> errorMessage = const Value.absent(),
+            Value<int> retryCount = const Value.absent(),
+            Value<DateTime?> lastProcessedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               DocumentsCompanion.insert(
@@ -3603,6 +4191,8 @@ class $$DocumentsTableTableManager extends RootTableManager<
             status: status,
             progress: progress,
             errorMessage: errorMessage,
+            retryCount: retryCount,
+            lastProcessedAt: lastProcessedAt,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3611,10 +4201,16 @@ class $$DocumentsTableTableManager extends RootTableManager<
                     $$DocumentsTableReferences(db, table, e)
                   ))
               .toList(),
-          prefetchHooksCallback: ({sessionId = false, chunksRefs = false}) {
+          prefetchHooksCallback: (
+              {sessionId = false,
+              chunksRefs = false,
+              sessionDocumentRefsRefs = false}) {
             return PrefetchHooks(
               db: db,
-              explicitlyWatchedTables: [if (chunksRefs) db.chunks],
+              explicitlyWatchedTables: [
+                if (chunksRefs) db.chunks,
+                if (sessionDocumentRefsRefs) db.sessionDocumentRefs
+              ],
               addJoins: <
                   T extends TableManagerState<
                       dynamic,
@@ -3654,6 +4250,19 @@ class $$DocumentsTableTableManager extends RootTableManager<
                         referencedItemsForCurrentItem:
                             (item, referencedItems) => referencedItems
                                 .where((e) => e.documentId == item.id),
+                        typedResults: items),
+                  if (sessionDocumentRefsRefs)
+                    await $_getPrefetchedData<Document, $DocumentsTable,
+                            SessionDocumentRef>(
+                        currentTable: table,
+                        referencedTable: $$DocumentsTableReferences
+                            ._sessionDocumentRefsRefsTable(db),
+                        managerFromTypedResult: (p0) =>
+                            $$DocumentsTableReferences(db, table, p0)
+                                .sessionDocumentRefsRefs,
+                        referencedItemsForCurrentItem:
+                            (item, referencedItems) => referencedItems
+                                .where((e) => e.documentId == item.id),
                         typedResults: items)
                 ];
               },
@@ -3673,7 +4282,8 @@ typedef $$DocumentsTableProcessedTableManager = ProcessedTableManager<
     $$DocumentsTableUpdateCompanionBuilder,
     (Document, $$DocumentsTableReferences),
     Document,
-    PrefetchHooks Function({bool sessionId, bool chunksRefs})>;
+    PrefetchHooks Function(
+        {bool sessionId, bool chunksRefs, bool sessionDocumentRefsRefs})>;
 typedef $$ChunksTableCreateCompanionBuilder = ChunksCompanion Function({
   required String id,
   required String documentId,
@@ -4747,6 +5357,349 @@ typedef $$UserMemoryTableProcessedTableManager = ProcessedTableManager<
     ),
     UserMemoryData,
     PrefetchHooks Function()>;
+typedef $$SessionDocumentRefsTableCreateCompanionBuilder
+    = SessionDocumentRefsCompanion Function({
+  required String sessionId,
+  required String documentId,
+  required DateTime attachedAt,
+  required int displayOrder,
+  Value<int> rowid,
+});
+typedef $$SessionDocumentRefsTableUpdateCompanionBuilder
+    = SessionDocumentRefsCompanion Function({
+  Value<String> sessionId,
+  Value<String> documentId,
+  Value<DateTime> attachedAt,
+  Value<int> displayOrder,
+  Value<int> rowid,
+});
+
+final class $$SessionDocumentRefsTableReferences extends BaseReferences<
+    _$AppDatabase, $SessionDocumentRefsTable, SessionDocumentRef> {
+  $$SessionDocumentRefsTableReferences(
+      super.$_db, super.$_table, super.$_typedResult);
+
+  static $SessionsTable _sessionIdTable(_$AppDatabase db) =>
+      db.sessions.createAlias($_aliasNameGenerator(
+          db.sessionDocumentRefs.sessionId, db.sessions.id));
+
+  $$SessionsTableProcessedTableManager get sessionId {
+    final $_column = $_itemColumn<String>('session_id')!;
+
+    final manager = $$SessionsTableTableManager($_db, $_db.sessions)
+        .filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_sessionIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: [item]));
+  }
+
+  static $DocumentsTable _documentIdTable(_$AppDatabase db) =>
+      db.documents.createAlias($_aliasNameGenerator(
+          db.sessionDocumentRefs.documentId, db.documents.id));
+
+  $$DocumentsTableProcessedTableManager get documentId {
+    final $_column = $_itemColumn<String>('document_id')!;
+
+    final manager = $$DocumentsTableTableManager($_db, $_db.documents)
+        .filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_documentIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+        manager.$state.copyWith(prefetchedData: [item]));
+  }
+}
+
+class $$SessionDocumentRefsTableFilterComposer
+    extends Composer<_$AppDatabase, $SessionDocumentRefsTable> {
+  $$SessionDocumentRefsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<DateTime> get attachedAt => $composableBuilder(
+      column: $table.attachedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get displayOrder => $composableBuilder(
+      column: $table.displayOrder, builder: (column) => ColumnFilters(column));
+
+  $$SessionsTableFilterComposer get sessionId {
+    final $$SessionsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableFilterComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+
+  $$DocumentsTableFilterComposer get documentId {
+    final $$DocumentsTableFilterComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.documentId,
+        referencedTable: $db.documents,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$DocumentsTableFilterComposer(
+              $db: $db,
+              $table: $db.documents,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionDocumentRefsTableOrderingComposer
+    extends Composer<_$AppDatabase, $SessionDocumentRefsTable> {
+  $$SessionDocumentRefsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<DateTime> get attachedAt => $composableBuilder(
+      column: $table.attachedAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get displayOrder => $composableBuilder(
+      column: $table.displayOrder,
+      builder: (column) => ColumnOrderings(column));
+
+  $$SessionsTableOrderingComposer get sessionId {
+    final $$SessionsTableOrderingComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableOrderingComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+
+  $$DocumentsTableOrderingComposer get documentId {
+    final $$DocumentsTableOrderingComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.documentId,
+        referencedTable: $db.documents,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$DocumentsTableOrderingComposer(
+              $db: $db,
+              $table: $db.documents,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionDocumentRefsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SessionDocumentRefsTable> {
+  $$SessionDocumentRefsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<DateTime> get attachedAt => $composableBuilder(
+      column: $table.attachedAt, builder: (column) => column);
+
+  GeneratedColumn<int> get displayOrder => $composableBuilder(
+      column: $table.displayOrder, builder: (column) => column);
+
+  $$SessionsTableAnnotationComposer get sessionId {
+    final $$SessionsTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.sessionId,
+        referencedTable: $db.sessions,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$SessionsTableAnnotationComposer(
+              $db: $db,
+              $table: $db.sessions,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+
+  $$DocumentsTableAnnotationComposer get documentId {
+    final $$DocumentsTableAnnotationComposer composer = $composerBuilder(
+        composer: this,
+        getCurrentColumn: (t) => t.documentId,
+        referencedTable: $db.documents,
+        getReferencedColumn: (t) => t.id,
+        builder: (joinBuilder,
+                {$addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer}) =>
+            $$DocumentsTableAnnotationComposer(
+              $db: $db,
+              $table: $db.documents,
+              $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+              joinBuilder: joinBuilder,
+              $removeJoinBuilderFromRootComposer:
+                  $removeJoinBuilderFromRootComposer,
+            ));
+    return composer;
+  }
+}
+
+class $$SessionDocumentRefsTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $SessionDocumentRefsTable,
+    SessionDocumentRef,
+    $$SessionDocumentRefsTableFilterComposer,
+    $$SessionDocumentRefsTableOrderingComposer,
+    $$SessionDocumentRefsTableAnnotationComposer,
+    $$SessionDocumentRefsTableCreateCompanionBuilder,
+    $$SessionDocumentRefsTableUpdateCompanionBuilder,
+    (SessionDocumentRef, $$SessionDocumentRefsTableReferences),
+    SessionDocumentRef,
+    PrefetchHooks Function({bool sessionId, bool documentId})> {
+  $$SessionDocumentRefsTableTableManager(
+      _$AppDatabase db, $SessionDocumentRefsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SessionDocumentRefsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SessionDocumentRefsTableOrderingComposer(
+                  $db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SessionDocumentRefsTableAnnotationComposer(
+                  $db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> sessionId = const Value.absent(),
+            Value<String> documentId = const Value.absent(),
+            Value<DateTime> attachedAt = const Value.absent(),
+            Value<int> displayOrder = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              SessionDocumentRefsCompanion(
+            sessionId: sessionId,
+            documentId: documentId,
+            attachedAt: attachedAt,
+            displayOrder: displayOrder,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String sessionId,
+            required String documentId,
+            required DateTime attachedAt,
+            required int displayOrder,
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              SessionDocumentRefsCompanion.insert(
+            sessionId: sessionId,
+            documentId: documentId,
+            attachedAt: attachedAt,
+            displayOrder: displayOrder,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (
+                    e.readTable(table),
+                    $$SessionDocumentRefsTableReferences(db, table, e)
+                  ))
+              .toList(),
+          prefetchHooksCallback: ({sessionId = false, documentId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins: <
+                  T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic>>(state) {
+                if (sessionId) {
+                  state = state.withJoin(
+                    currentTable: table,
+                    currentColumn: table.sessionId,
+                    referencedTable: $$SessionDocumentRefsTableReferences
+                        ._sessionIdTable(db),
+                    referencedColumn: $$SessionDocumentRefsTableReferences
+                        ._sessionIdTable(db)
+                        .id,
+                  ) as T;
+                }
+                if (documentId) {
+                  state = state.withJoin(
+                    currentTable: table,
+                    currentColumn: table.documentId,
+                    referencedTable: $$SessionDocumentRefsTableReferences
+                        ._documentIdTable(db),
+                    referencedColumn: $$SessionDocumentRefsTableReferences
+                        ._documentIdTable(db)
+                        .id,
+                  ) as T;
+                }
+
+                return state;
+              },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ));
+}
+
+typedef $$SessionDocumentRefsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $SessionDocumentRefsTable,
+    SessionDocumentRef,
+    $$SessionDocumentRefsTableFilterComposer,
+    $$SessionDocumentRefsTableOrderingComposer,
+    $$SessionDocumentRefsTableAnnotationComposer,
+    $$SessionDocumentRefsTableCreateCompanionBuilder,
+    $$SessionDocumentRefsTableUpdateCompanionBuilder,
+    (SessionDocumentRef, $$SessionDocumentRefsTableReferences),
+    SessionDocumentRef,
+    PrefetchHooks Function({bool sessionId, bool documentId})>;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -4765,6 +5718,8 @@ class $AppDatabaseManager {
       $$SessionMemoryTableTableManager(_db, _db.sessionMemory);
   $$UserMemoryTableTableManager get userMemory =>
       $$UserMemoryTableTableManager(_db, _db.userMemory);
+  $$SessionDocumentRefsTableTableManager get sessionDocumentRefs =>
+      $$SessionDocumentRefsTableTableManager(_db, _db.sessionDocumentRefs);
 }
 
 mixin _$SessionsDaoMixin on DatabaseAccessor<AppDatabase> {
@@ -4873,4 +5828,25 @@ class UserMemoryDaoManager {
   UserMemoryDaoManager(this._db);
   $$UserMemoryTableTableManager get userMemory =>
       $$UserMemoryTableTableManager(_db.attachedDatabase, _db.userMemory);
+}
+
+mixin _$SessionDocumentRefsDaoMixin on DatabaseAccessor<AppDatabase> {
+  $SessionsTable get sessions => attachedDatabase.sessions;
+  $DocumentsTable get documents => attachedDatabase.documents;
+  $SessionDocumentRefsTable get sessionDocumentRefs =>
+      attachedDatabase.sessionDocumentRefs;
+  SessionDocumentRefsDaoManager get managers =>
+      SessionDocumentRefsDaoManager(this);
+}
+
+class SessionDocumentRefsDaoManager {
+  final _$SessionDocumentRefsDaoMixin _db;
+  SessionDocumentRefsDaoManager(this._db);
+  $$SessionsTableTableManager get sessions =>
+      $$SessionsTableTableManager(_db.attachedDatabase, _db.sessions);
+  $$DocumentsTableTableManager get documents =>
+      $$DocumentsTableTableManager(_db.attachedDatabase, _db.documents);
+  $$SessionDocumentRefsTableTableManager get sessionDocumentRefs =>
+      $$SessionDocumentRefsTableTableManager(
+          _db.attachedDatabase, _db.sessionDocumentRefs);
 }

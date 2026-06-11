@@ -1,14 +1,22 @@
+import 'package:drift/drift.dart' hide Column;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
+
 import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
+import 'package:offline_chat/core/constants/document_constants.dart';
+import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/database/tables/messages_table.dart';
 import 'package:offline_chat/features/chat/bloc/chat_bloc.dart';
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/features/chat/views/message_bubble.dart';
+import 'package:offline_chat/features/knowledge/views/session_files_panel.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/injection/service_locator.dart';
+import 'package:offline_chat/services/chunker/document_upload_queue.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
 import 'package:scrollview_observer/scrollview_observer.dart';
 
@@ -137,6 +145,7 @@ class _ChatViewState extends State<ChatView> {
         ),
         title: const Text('Chat'),
         actions: [
+          _ScopeSelector(),
           _ClearButton(sessionId: widget.sessionId),
         ],
       ),
@@ -193,6 +202,112 @@ class _ModelNotInstalledBanner extends StatelessWidget {
         }
         return const SizedBox.shrink();
       },
+    );
+  }
+}
+
+/// PopupMenu chọn KnowledgeScope cho session hiện tại.
+class _ScopeSelector extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<ChatBloc, ChatState>(
+      buildWhen: (prev, curr) =>
+          prev.knowledgeScope != curr.knowledgeScope,
+      builder: (context, state) {
+        final currentScope = state.knowledgeScope;
+        return PopupMenuButton<KnowledgeScope>(
+          tooltip: 'Phạm vi kiến thức',
+          icon: Icon(
+            Icons.travel_explore,
+            color: currentScope == KnowledgeScope.attachedAndGlobal
+                ? AppColors.primaryLight
+                : null,
+          ),
+          onSelected: (scope) {
+            context.read<ChatBloc>().add(KnowledgeScopeChanged(scope));
+          },
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: KnowledgeScope.attachedOnly,
+              child: _ScopeOption(
+                icon: Icons.attach_file,
+                label: 'Chỉ session này',
+                subtitle: 'Chỉ tài liệu gắn vào session',
+                isSelected: currentScope == KnowledgeScope.attachedOnly,
+              ),
+            ),
+            PopupMenuItem(
+              value: KnowledgeScope.globalOnly,
+              child: _ScopeOption(
+                icon: Icons.language,
+                label: 'Chỉ toàn cục',
+                subtitle: 'Tài liệu chia sẻ chung',
+                isSelected: currentScope == KnowledgeScope.globalOnly,
+              ),
+            ),
+            PopupMenuItem(
+              value: KnowledgeScope.attachedAndGlobal,
+              child: _ScopeOption(
+                icon: Icons.explore,
+                label: 'Tất cả',
+                subtitle: 'Session + toàn cục',
+                isSelected: currentScope == KnowledgeScope.attachedAndGlobal,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ScopeOption extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String subtitle;
+  final bool isSelected;
+
+  const _ScopeOption({
+    required this.icon,
+    required this.label,
+    required this.subtitle,
+    required this.isSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(
+          icon,
+          size: 20,
+          color: isSelected ? AppColors.primaryLight : AppColors.subtleLight,
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isSelected ? AppColors.primaryLight : null,
+                ),
+              ),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.subtleLight,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (isSelected)
+          const Icon(Icons.check, size: 18, color: AppColors.primaryLight),
+      ],
     );
   }
 }
@@ -714,6 +829,88 @@ class _ChatInputBarState extends State<ChatInputBar> {
     context.read<ChatBloc>().add(SendMessageRequested(text));
   }
 
+  Future<void> _onAttachFile() async {
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf', 'docx', 'txt', 'md'],
+        allowMultiple: true,
+      );
+
+      if (result == null || result.files.isEmpty) return;
+
+      for (final file in result.files) {
+        final filePath = file.path;
+        if (filePath == null) continue;
+
+        final uuid = Uuid();
+        final docId = uuid.v4();
+
+        // Insert document vào DB với status=pending
+        await sl<AppDatabase>().documentsDao.insertDocument(
+          DocumentsCompanion(
+            id: Value(docId),
+            name: Value(file.name),
+            path: Value(filePath),
+            sizeBytes: Value(file.size),
+            mimeType: Value(file.extension ?? ''),
+            sessionId: Value(widget.sessionId),
+            status: Value(IndexStatus.pending.toInt),
+            createdAt: Value(DateTime.now()),
+          ),
+        );
+
+        // Enqueue job vào upload queue
+        sl<DocumentUploadQueue>().enqueue(
+          DocumentUploadJob(
+            documentId: docId,
+            filePath: filePath,
+            name: file.name,
+            sizeBytes: file.size,
+            mimeType: file.extension ?? '',
+            sessionId: widget.sessionId,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Lỗi khi tải file: $e')),
+        );
+      }
+    }
+  }
+
+  void _showAttachMenu() {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.upload_file),
+              title: const Text('Tải file mới'),
+              subtitle: const Text('PDF, DOCX, TXT, MD'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _onAttachFile();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_copy_outlined),
+              title: const Text('Xem tài liệu đính kèm'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                SessionFilesPanel.show(context, widget.sessionId);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return BlocListener<ChatBloc, ChatState>(
@@ -739,6 +936,16 @@ class _ChatInputBarState extends State<ChatInputBar> {
         child: SafeArea(
           child: Row(
             children: [
+              // Nút attach file
+              IconButton(
+                onPressed: _isStreaming ? null : _showAttachMenu,
+                icon: const Icon(Icons.attach_file),
+                color: _isStreaming
+                    ? AppColors.subtleLight.withOpacity(0.4)
+                    : AppColors.subtleLight,
+                tooltip: 'Đính kèm tài liệu',
+              ),
+              const SizedBox(width: 4),
               Expanded(
                 child: TextField(
                   controller: _controller,

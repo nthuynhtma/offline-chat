@@ -25,15 +25,18 @@ enum IndexStatus {
 /// Phạm vi RAG retrieval cho một session.
 ///
 /// Lưu trong [sessions.knowledgeScope] để persist theo conversation.
+///
+/// DB values are stable:
+///   0 = attachedOnly,  1 = globalOnly,  2 = attachedAndGlobal
 enum KnowledgeScope {
-  /// Chỉ dùng file đã upload trong session này
-  sessionOnly,
+  /// Chỉ dùng tài liệu đã attach (session docs + referenced global docs)
+  attachedOnly,
 
   /// Chỉ dùng Global KB
   globalOnly,
 
-  /// Dùng cả Global KB + Session files
-  globalAndSession,
+  /// Dùng cả tài liệu attach + toàn bộ Global KB
+  attachedAndGlobal,
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -50,6 +53,7 @@ extension KnowledgeScopeX on KnowledgeScope {
   int get toInt => index;
 
   static KnowledgeScope fromInt(int value) {
+    // Values: 0=attachedOnly, 1=globalOnly, 2=attachedAndGlobal
     return KnowledgeScope.values[
         value.clamp(0, KnowledgeScope.values.length - 1)];
   }

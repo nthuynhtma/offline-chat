@@ -23,6 +23,12 @@ class Documents extends Table {
   /// Thông báo lỗi nếu status=failed
   TextColumn get errorMessage => text().nullable()();
 
+  /// Số lần retry indexing (reset khi indexing thành công)
+  IntColumn get retryCount => integer().withDefault(const Constant(0))();
+
+  /// Thời gian xử lý lần cuối (null nếu chưa từng xử lý)
+  DateTimeColumn get lastProcessedAt => dateTime().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

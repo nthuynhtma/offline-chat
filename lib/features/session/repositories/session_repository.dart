@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
+import 'package:offline_chat/core/constants/document_constants.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/features/session/models/session_model.dart';
 
@@ -12,6 +13,7 @@ abstract interface class SessionRepository {
   Future<void> updateSessionTitle(String id, String title);
   Future<void> deleteSession(String id);
   Future<void> updateSessionTimestamp(String id);
+  Future<void> updateKnowledgeScope(String id, KnowledgeScope scope);
 }
 
 class SessionRepositoryImpl implements SessionRepository {
@@ -75,6 +77,15 @@ class SessionRepositoryImpl implements SessionRepository {
   Future<void> updateSessionTimestamp(String id) async {
     await _dao.updateSession(SessionsCompanion(
       id: Value(id),
+      updatedAt: Value(DateTime.now()),
+    ));
+  }
+
+  @override
+  Future<void> updateKnowledgeScope(String id, KnowledgeScope scope) async {
+    await _dao.updateSession(SessionsCompanion(
+      id: Value(id),
+      knowledgeScope: Value(scope.toInt),
       updatedAt: Value(DateTime.now()),
     ));
   }

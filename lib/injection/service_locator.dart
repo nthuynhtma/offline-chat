@@ -3,11 +3,13 @@ import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/features/chat/bloc/chat_bloc.dart';
 import 'package:offline_chat/features/chat/repositories/message_repository.dart';
 import 'package:offline_chat/features/knowledge/bloc/knowledge_bloc.dart';
+import 'package:offline_chat/features/knowledge/bloc/session_files_cubit.dart';
 import 'package:offline_chat/features/knowledge/repositories/document_repository.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/features/session/bloc/session_bloc.dart';
 import 'package:offline_chat/features/session/repositories/session_repository.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
+import 'package:offline_chat/services/chunker/document_upload_queue.dart';
 import 'package:offline_chat/services/context/context_manager_service.dart';
 import 'package:offline_chat/services/memory_store/memory_store_service.dart';
 import 'package:offline_chat/services/memory_store/summary_service.dart';
@@ -137,5 +139,25 @@ Future<void> setupLocator() async {
 
   sl.registerLazySingleton<KnowledgeBloc>(
     () => KnowledgeBloc(sl<DocumentRepository>()),
+  );
+
+  // ─── Upload Queue ──────────────────────────────────────────────────────────
+  final db = sl<AppDatabase>();
+  sl.registerLazySingleton<DocumentUploadQueue>(
+    () => DocumentUploadQueue(
+      docsDao: db.documentsDao,
+      chunksDao: db.chunksDao,
+      parser: sl<DocumentParserService>(),
+      chunker: sl<ChunkingService>(),
+      gecko: sl<GeckoService>(),
+      vectorStore: sl<VectorStoreService>(),
+    ),
+  );
+
+  sl.registerLazySingleton<SessionFilesCubit>(
+    () => SessionFilesCubit(
+      documentsDao: db.documentsDao,
+      uploadQueue: sl<DocumentUploadQueue>(),
+    ),
   );
 }

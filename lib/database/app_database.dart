@@ -12,6 +12,7 @@ import 'tables/chunks_table.dart';
 import 'tables/vectors_table.dart';
 import 'tables/session_memory_table.dart';
 import 'tables/user_memory_table.dart';
+import 'tables/session_document_refs_table.dart';
 
 part 'app_database.g.dart';
 part 'daos/sessions_dao.dart';
@@ -21,6 +22,7 @@ part 'daos/chunks_dao.dart';
 part 'daos/vectors_dao.dart';
 part 'daos/session_memory_dao.dart';
 part 'daos/user_memory_dao.dart';
+part 'daos/session_document_refs_dao.dart';
 
 @DriftDatabase(
   tables: [
@@ -31,6 +33,7 @@ part 'daos/user_memory_dao.dart';
     Vectors,
     SessionMemory,
     UserMemory,
+    SessionDocumentRefs,
   ],
   daos: [
     SessionsDao,
@@ -40,6 +43,7 @@ part 'daos/user_memory_dao.dart';
     VectorsDao,
     SessionMemoryDao,
     UserMemoryDao,
+    SessionDocumentRefsDao,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -48,7 +52,7 @@ class AppDatabase extends _$AppDatabase {
       : super(queryExecutor ?? _openConnection());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -93,6 +97,17 @@ class AppDatabase extends _$AppDatabase {
             // Index
             await customStatement(
               'CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id)',
+            );
+          }
+          if (from < 4) {
+            // Tạo junction table session_document_refs
+            await m.createTable(sessionDocumentRefs);
+            // Thêm retry_count và last_processed_at cho documents
+            await customStatement(
+              'ALTER TABLE documents ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0',
+            );
+            await customStatement(
+              'ALTER TABLE documents ADD COLUMN last_processed_at TEXT',
             );
           }
         },
