@@ -2,43 +2,41 @@
 
 ## Tổng quan
 
-Dùng **drift** package (formerly moor) cho type-safe SQLite trên cả Android và iOS.
+Dùng **drift** package cho type-safe SQLite.
 
-```
-pubspec.yaml dependencies:
-  drift: ^2.x
+```yaml
+dependencies:
+  drift: ^2.18.0
   sqlite3_flutter_libs: ^0.x
   path_provider: ^2.x
   path: ^1.x
-
 dev_dependencies:
-  drift_dev: ^2.x
+  drift_dev: ^2.18.0
   build_runner: ^2.x
 ```
 
 ---
 
-## Tables Definition
+## Tables
 
-### `database/tables/sessions_table.dart`
+### sessions_table.dart
 ```dart
-import 'package:drift/drift.dart';
-
 class Sessions extends Table {
   TextColumn get id => text()();
   TextColumn get title => text().withLength(min: 1, max: 200)();
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
 
+  /// KnowledgeScope: 0=attachedOnly, 1=globalOnly, 2=attachedAndGlobal (default)
+  IntColumn get knowledgeScope => integer().withDefault(const Constant(2))();
+
   @override
   Set<Column> get primaryKey => {id};
 }
 ```
 
-### `database/tables/messages_table.dart`
+### messages_table.dart
 ```dart
-import 'package:drift/drift.dart';
-
 enum MessageRole { user, assistant, system }
 
 class Messages extends Table {
@@ -53,10 +51,8 @@ class Messages extends Table {
 }
 ```
 
-### `database/tables/documents_table.dart`
+### documents_table.dart
 ```dart
-import 'package:drift/drift.dart';
-
 class Documents extends Table {
   TextColumn get id => text()();
   TextColumn get name => text()();
@@ -66,18 +62,36 @@ class Documents extends Table {
   TextColumn get mimeType => text()();
   DateTimeColumn get createdAt => dateTime()();
 
+  /// null = Global KB, non-null = Session-specific document
+  TextColumn get sessionId =>
+      text().nullable().references(Sessions, #id, onDelete: KeyAction.cascade)();
+
+  /// IndexStatus: 0=pending, 1=processing, 2=completed, 3=failed
+  IntColumn get status => integer().withDefault(const Constant(0))();
+
+  /// Progress 0.0→1.0 trong pipeline indexing
+  RealColumn get progress => real().withDefault(const Constant(0.0))();
+
+  /// Thông báo lỗi nếu status=failed
+  TextColumn get errorMessage => text().nullable()();
+
+  /// Số lần retry indexing
+  IntColumn get retryCount => integer().withDefault(const Constant(0))();
+
+  /// Thời gian xử lý lần cuối
+  DateTimeColumn get lastProcessedAt => dateTime().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }
 ```
 
-### `database/tables/chunks_table.dart`
+### chunks_table.dart
 ```dart
-import 'package:drift/drift.dart';
-
 class Chunks extends Table {
   TextColumn get id => text()();
-  TextColumn get documentId => text().references(Documents, #id, onDelete: KeyAction.cascade)();
+  TextColumn get documentId =>
+      text().references(Documents, #id, onDelete: KeyAction.cascade)();
   TextColumn get chunkText => text()();
   IntColumn get chunkIndex => integer()();
   IntColumn get tokenCount => integer()();
@@ -88,38 +102,88 @@ class Chunks extends Table {
 }
 ```
 
-### `database/tables/vectors_table.dart`
+### vectors_table.dart
 ```dart
-import 'package:drift/drift.dart';
-
 class Vectors extends Table {
   TextColumn get id => text()();
-  TextColumn get chunkId => text().references(Chunks, #id, onDelete: KeyAction.cascade)();
-  BlobColumn get embedding => blob()(); // Float32List serialized as Uint8List
-  DateTimeColumn get createdAt => dateTime()();
+  TextColumn get chunkId =>
+      text().references(Chunks, #id, onDelete: KeyAction.cascade)();
+  BlobColumn get embedding => blob()(); // Float32List serialized
 
   @override
   Set<Column> get primaryKey => {id};
 }
 ```
 
+### session_document_refs_table.dart (junction table)
+```dart
+class SessionDocumentRefs extends Table {
+  TextColumn get sessionId =>
+      text().references(Sessions, #id, onDelete: KeyAction.cascade)();
+  TextColumn get documentId =>
+      text().references(Documents, #id, onDelete: KeyAction.cascade)();
+  DateTimeColumn get attachedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {sessionId, documentId};
+}
+```
+
+### session_memory_table.dart
+```dart
+class SessionMemory extends Table {
+  TextColumn get sessionId => text().references(Sessions, #id)();
+  TextColumn get summary => text()();
+  IntColumn get summaryVersion => integer()();
+  IntColumn get msgCount => integer()();
+  IntColumn get estTokens => integer()();
+  IntColumn get runningTokenCount => integer()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {sessionId};
+}
+```
+
+### user_memory_table.dart
+```dart
+class UserMemory extends Table {
+  TextColumn get namespace => text()();
+  TextColumn get key => text()();
+  TextColumn get value => text()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {namespace, key};
+}
+```
+
 ---
 
-## App Database
+## AppDatabase
 
-### `database/app_database.dart`
 ```dart
-import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
-import 'dart:io';
-
-part 'app_database.g.dart';
-
 @DriftDatabase(
-  tables: [Sessions, Messages, Documents, Chunks, Vectors],
-  daos: [SessionsDao, MessagesDao, DocumentsDao, ChunksDao, VectorsDao],
+  tables: [
+    Sessions,
+    Messages,
+    Documents,
+    SessionDocumentRefs,
+    Chunks,
+    Vectors,
+    SessionMemory,
+    UserMemory,
+  ],
+  daos: [
+    SessionsDao,
+    MessagesDao,
+    DocumentsDao,
+    SessionDocumentRefsDao,
+    ChunksDao,
+    VectorsDao,
+    SessionMemoryDao,
+    UserMemoryDao,
+  ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
@@ -131,7 +195,7 @@ class AppDatabase extends _$AppDatabase {
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (m) async {
       await m.createAll();
-      // Create indexes
+      // Indexes
       await customStatement(
         'CREATE INDEX idx_messages_session ON messages(session_id, created_at)',
       );
@@ -144,209 +208,54 @@ class AppDatabase extends _$AppDatabase {
     },
   );
 }
-
-LazyDatabase _openConnection() {
-  return LazyDatabase(() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dir.path, 'offline_chat.db'));
-    return NativeDatabase.createInBackground(file);
-  });
-}
 ```
 
 ---
 
 ## DAOs
 
-### `database/daos/sessions_dao.dart`
+### DocumentsDao — Queries quan trọng
 ```dart
-import 'package:drift/drift.dart';
-import '../app_database.dart';
+// Filter documents by status + scope (dùng cho RAG)
+Future<Set<String>> getCompletedDocumentIdsBySessionId(String sessionId);
+Future<Set<String>> getCompletedDocumentIdsByIds(Set<String> ids);
+Future<Set<String>> getCompletedGlobalDocumentIds();
+Future<List<Document>> getDocumentsByRetryNeeded();
 
-part 'sessions_dao.g.dart';
-
-@DriftAccessor(tables: [Sessions])
-class SessionsDao extends DatabaseAccessor<AppDatabase> with _$SessionsDaoMixin {
-  SessionsDao(super.db);
-
-  Future<List<Session>> getAllSessions() =>
-      (select(sessions)..orderBy([(s) => OrderingTerm.desc(s.updatedAt)])).get();
-
-  Stream<List<Session>> watchAllSessions() =>
-      (select(sessions)..orderBy([(s) => OrderingTerm.desc(s.updatedAt)])).watch();
-
-  Future<Session?> getSessionById(String id) =>
-      (select(sessions)..where((s) => s.id.equals(id))).getSingleOrNull();
-
-  Future<void> insertSession(SessionsCompanion session) =>
-      into(sessions).insert(session);
-
-  Future<void> updateSession(SessionsCompanion session) =>
-      (update(sessions)..where((s) => s.id.equals(session.id.value)))
-          .write(session);
-
-  Future<void> deleteSession(String id) =>
-      (delete(sessions)..where((s) => s.id.equals(id))).go();
-}
+// Update pipeline
+updateDocumentStatus(id, status, {error})
+updateDocumentProgress(id, step, total)
+updateChunkCount(id, count)
+incrementRetryCount(id) / resetRetryCount(id)
 ```
 
-### `database/daos/messages_dao.dart`
+### ChunksDao
 ```dart
-import 'package:drift/drift.dart';
-import '../app_database.dart';
-
-part 'messages_dao.g.dart';
-
-@DriftAccessor(tables: [Messages])
-class MessagesDao extends DatabaseAccessor<AppDatabase> with _$MessagesDaoMixin {
-  MessagesDao(super.db);
-
-  Future<List<Message>> getMessagesBySession(String sessionId) =>
-      (select(messages)
-        ..where((m) => m.sessionId.equals(sessionId))
-        ..orderBy([(m) => OrderingTerm.asc(m.createdAt)]))
-          .get();
-
-  /// Lấy N messages gần nhất của session (cho context window)
-  Future<List<Message>> getRecentMessages(String sessionId, {int limit = 20}) =>
-      (select(messages)
-        ..where((m) => m.sessionId.equals(sessionId))
-        ..orderBy([(m) => OrderingTerm.desc(m.createdAt)])
-        ..limit(limit))
-          .get()
-          .then((list) => list.reversed.toList());
-
-  Stream<List<Message>> watchMessagesBySession(String sessionId) =>
-      (select(messages)
-        ..where((m) => m.sessionId.equals(sessionId))
-        ..orderBy([(m) => OrderingTerm.asc(m.createdAt)]))
-          .watch();
-
-  Future<void> insertMessage(MessagesCompanion message) =>
-      into(messages).insert(message);
-
-  Future<void> deleteMessagesBySession(String sessionId) =>
-      (delete(messages)..where((m) => m.sessionId.equals(sessionId))).go();
-}
+Future<List<Chunk>> getChunksByDocument(String documentId);
+Future<List<Chunk>> getChunksByIds(List<String> ids);
+Future<Set<String>> getChunkIdsByDocumentIds(Set<String> documentIds);
+Future<void> insertChunks(List<ChunksCompanion> chunkList);
 ```
 
-### `database/daos/documents_dao.dart`
+### VectorsDao
 ```dart
-import 'package:drift/drift.dart';
-import '../app_database.dart';
-
-part 'documents_dao.g.dart';
-
-@DriftAccessor(tables: [Documents])
-class DocumentsDao extends DatabaseAccessor<AppDatabase> with _$DocumentsDaoMixin {
-  DocumentsDao(super.db);
-
-  Future<List<Document>> getAllDocuments() =>
-      (select(documents)..orderBy([(d) => OrderingTerm.desc(d.createdAt)])).get();
-
-  Stream<List<Document>> watchAllDocuments() =>
-      (select(documents)..orderBy([(d) => OrderingTerm.desc(d.createdAt)])).watch();
-
-  Future<void> insertDocument(DocumentsCompanion doc) =>
-      into(documents).insert(doc);
-
-  Future<void> updateChunkCount(String docId, int count) =>
-      (update(documents)..where((d) => d.id.equals(docId)))
-          .write(DocumentsCompanion(chunkCount: Value(count)));
-
-  Future<void> deleteDocument(String id) =>
-      (delete(documents)..where((d) => d.id.equals(id))).go();
-}
-```
-
-### `database/daos/chunks_dao.dart`
-```dart
-import 'package:drift/drift.dart';
-import '../app_database.dart';
-
-part 'chunks_dao.g.dart';
-
-@DriftAccessor(tables: [Chunks])
-class ChunksDao extends DatabaseAccessor<AppDatabase> with _$ChunksDaoMixin {
-  ChunksDao(super.db);
-
-  Future<List<Chunk>> getChunksByDocument(String documentId) =>
-      (select(chunks)
-        ..where((c) => c.documentId.equals(documentId))
-        ..orderBy([(c) => OrderingTerm.asc(c.chunkIndex)]))
-          .get();
-
-  Future<List<Chunk>> getChunksByIds(List<String> ids) =>
-      (select(chunks)..where((c) => c.id.isIn(ids))).get();
-
-  Future<void> insertChunks(List<ChunksCompanion> chunkList) =>
-      batch((b) => b.insertAll(chunks, chunkList));
-
-  Future<void> deleteChunksByDocument(String documentId) =>
-      (delete(chunks)..where((c) => c.documentId.equals(documentId))).go();
-}
-```
-
-### `database/daos/vectors_dao.dart`
-```dart
-import 'package:drift/drift.dart';
-import '../app_database.dart';
-
-part 'vectors_dao.g.dart';
-
-@DriftAccessor(tables: [Vectors])
-class VectorsDao extends DatabaseAccessor<AppDatabase> with _$VectorsDaoMixin {
-  VectorsDao(super.db);
-
-  /// Lấy tất cả vectors (dùng cho brute-force search)
-  Future<List<Vector>> getAllVectors() => select(vectors).get();
-
-  Future<void> insertVectors(List<VectorsCompanion> vectorList) =>
-      batch((b) => b.insertAll(vectors, vectorList));
-
-  Future<void> deleteVectorsByChunkIds(List<String> chunkIds) =>
-      (delete(vectors)..where((v) => v.chunkId.isIn(chunkIds))).go();
-
-  Future<int> countVectors() =>
-      vectors.count().getSingle();
-}
+Future<List<Vector>> getAllVectors();     // brute-force search
+Future<void> insertVectors(List<VectorsCompanion> vectorList);
+Future<void> deleteVectorsByChunkIds(List<String> chunkIds);
+Future<int> countVectors();
 ```
 
 ---
 
-## Serialization Helpers
+## Serialization
 
-### `core/utils/embedding_serializer.dart`
 ```dart
-import 'dart:typed_data';
-
+// lib/core/utils/embedding_serializer.dart
 class EmbeddingSerializer {
-  /// Float32List → Uint8List để lưu vào SQLite BLOB
   static Uint8List serialize(List<double> embedding) {
-    final float32 = Float32List.fromList(embedding);
-    return float32.buffer.asUint8List();
+    return Float32List.fromList(embedding).buffer.asUint8List();
   }
-
-  /// Uint8List → List<double> khi đọc từ SQLite
   static List<double> deserialize(Uint8List bytes) {
     return Float32List.view(bytes.buffer).toList();
   }
 }
-```
-
----
-
-## Migrations (khi nâng schema version)
-
-```dart
-@override
-MigrationStrategy get migration => MigrationStrategy(
-  onCreate: (m) async { await m.createAll(); },
-  onUpgrade: (m, from, to) async {
-    if (from < 2) {
-      // Ví dụ: thêm cột tags vào documents
-      await m.addColumn(documents, documents.tags);
-    }
-  },
-);
-```

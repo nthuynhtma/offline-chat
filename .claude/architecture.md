@@ -6,249 +6,545 @@
 Flutter App
 │
 ├── Presentation Layer  (Widgets, Pages)
-├── Bloc Layer          (Business Logic)
-├── Repository Layer    (Data orchestration)
-├── Service Layer       (AI, Parsing, VectorStore)
-└── Data Layer          (Drift/SQLite, File System)
+├── Bloc Layer          (Business Logic + State Management)
+├── Service Layer       (AI, RAG, Parsing, VectorStore, Memory)
+└── Data Layer          (Drift/SQLite — DAOs, Tables)
 ```
 
 Áp dụng **Clean Architecture** kết hợp **Feature-first** folder structure.
+Business logic tập trung trong Bloc, không dùng setState. Services thuần, không biết về UI.
+
+**Chú ý:** Không còn Repository Layer riêng — MessageRepository và SessionRepository đơn giản, chỉ là wrapper DAO. DocumentRepository xử lý import + enqueue queue. Các service gọi DAO trực tiếp khi cần.
 
 ---
 
-## 2. Data Flow chính
-
-### Chat Flow
-```
-User types message
-    ↓
-ChatBloc.add(SendMessageEvent)
-    ↓
-ContextManager.buildPrompt(question, sessionId)
-    ├── SessionRepository.getRecentMessages(sessionId, limit: 20)
-    └── RAGRetriever.search(question, topK: 5)
-    ↓
-PromptBuilder.build(context, history, question)
-    ↓
-GemmaService.generateStream(prompt)
-    ↓
-ChatBloc emits ChatStreamingState(token)
-    ↓
-ChatPage rebuilds with new token
-    ↓
-[stream complete]
-    ↓
-MessageRepository.save(assistantMessage)
-```
-
-### RAG Ingestion Flow
-```
-User uploads PDF/DOCX/TXT
-    ↓
-KnowledgeBloc.add(ImportDocumentEvent)
-    ↓
-DocumentParser.parse(file) → rawText
-    ↓
-ChunkingEngine.chunk(rawText, size:500, overlap:100) → chunks[]
-    ↓
-GeckoService.embed(chunk) → vector[768]  (for each chunk)
-    ↓
-VectorStore.insert(chunkId, vector, chunkText)
-    ↓
-DocumentRepository.save(document, chunks)
-    ↓
-KnowledgeBloc emits IndexingCompleteState
-```
-
-### Retrieval Flow
-```
-User question
-    ↓
-GeckoService.embed(question) → queryVector
-    ↓
-VectorStore.search(queryVector, topK:5, threshold:0.7)
-    ↓
-returns RetrievedChunk[] (with score)
-    ↓
-ContextManager uses chunks in prompt
-```
-
----
-
-## 3. Layer Details
-
-### Presentation Layer
-- Chỉ chứa Widget, Page
-- KHÔNG chứa business logic
-- Lắng nghe Bloc state, dispatch Bloc event
-- Dùng `BlocBuilder`, `BlocListener`, `BlocConsumer`
-
-### Bloc Layer
-Mỗi feature có Bloc riêng:
-
-| Bloc | Trách nhiệm |
-|------|-------------|
-| `ChatBloc` | Gửi message, nhận stream response, quản lý streaming state |
-| `SessionBloc` | Tạo/đổi/xóa session, load session list |
-| `RAGBloc` | Trigger retrieval, trả về relevant chunks |
-| `KnowledgeBloc` | Import document, index, xóa document |
-| `ModelBloc` | Download model, kiểm tra model status |
-
-### Repository Layer
-- Orchestrate giữa Service và Database
-- Xử lý error, convert model
-- KHÔNG biết về Bloc hay Widget
-
-### Service Layer
-Services thuần, không phụ thuộc Flutter:
-
-| Service | Trách nhiệm |
-|---------|-------------|
-| `GemmaService` | Wrapper flutter_gemma, generate/stream |
-| `GeckoService` | Wrapper flutter_gemma EmbeddingModel, embed text → vector (KHÔNG còn tflite_flutter) |
-| `VectorStoreService` | CRUD vector, cosine search trên SQLite |
-| `DocumentParserService` | Parse PDF/DOCX/TXT → rawText |
-| `ChunkingService` | Split text → chunks với overlap |
-| `ContextManagerService` | Budget tokens, build context cho prompt |
-| `PromptBuilderService` | Điền template prompt |
-
----
-
-## 4. Context Manager - Chi tiết quan trọng
+## 2. App Initialization Flow
 
 ```dart
-class ContextManagerService {
-  static const int totalBudget = 8000; // tokens
-  static const int ragBudget   = 4000;
-  static const int historyBudget = 3000;
-  static const int questionBudget = 1000;
-
-  Future<BuiltContext> buildContext({
-    required String question,
-    required String sessionId,
-    required List<RetrievedChunk> ragChunks,
-  }) async {
-    // 1. Đếm token question
-    // 2. Lấy history, trim nếu > historyBudget
-    // 3. Nếu history vẫn quá dài → summarize
-    // 4. Ghép RAG chunks, trim nếu > ragBudget
-    // 5. Return BuiltContext
-  }
-}
+// main.dart
+main()
+  ├── WidgetsFlutterBinding.ensureInitialized()
+  ├── SystemChrome.setPreferredOrientations([portraitUp])
+  ├── FlutterError.onError (global Flutter error handler)
+  ├── ui.PlatformDispatcher.instance.onError (global async error handler)
+  ├── FlutterGemma.initialize()
+  ├── await setupLocator()     // DI registration (GetIt)
+  └── runApp(const App())
 ```
 
-Token counting: dùng xấp xỉ `text.length / 4` (tiếng Anh), `text.length / 2` (tiếng Việt).
+### setupLocator() — DI Registration (GetIt)
+
+**Services (LazySingleton):**
+| Service | Implementation | Deps |
+|---------|---------------|------|
+| `AppDatabase` | Drift SQLite | — |
+| `ModelManagerService` | `ModelManagerServiceImpl` | — |
+| `GemmaService` | `GemmaServiceImpl` | — |
+| `GeckoService` | `GeckoRetryService(GeckoServiceImpl)` | — |
+| `PromptBuilder` | `PromptBuilderImpl` | — |
+| `RagService` | `RagServiceImpl` | AppDatabase, GeckoService, VectorStoreService |
+| `ChunkingService` | `ChunkingServiceImpl` | — |
+| `DocumentParserService` | `DocumentParserServiceImpl` | — |
+| `VectorStoreService` | `VectorStoreServiceImpl` | AppDatabase |
+| `MemoryStoreService` | `MemoryStoreService` | AppDatabase |
+| `SummaryService` | `SummaryService` | GemmaService, MemoryStoreService |
+| `SemanticCacheService` | `SemanticCacheServiceImpl` | — |
+| `ExportSessionService` | `ExportSessionServiceImpl` | — |
+| `ContextManagerService` | `@Deprecated` | Giữ lại tránh break build |
+
+**Blocs:**
+| Bloc | Scope | Deps |
+|------|-------|------|
+| `ModelBloc` | LazySingleton | ModelManagerService, GemmaService, GeckoService |
+| `SessionBloc` | LazySingleton | SessionRepository |
+| `KnowledgeBloc` | LazySingleton | DocumentRepository, DocumentUploadQueue |
+| `SessionFilesCubit` | LazySingleton | DocumentsDao, SessionDocumentRefsDao, DocumentUploadQueue |
+| `ChatBloc` | **Factory** (mỗi session 1 instance) | MessageRepo, SessionRepo, GemmaService, ModelBloc, MemoryStore, SummaryService, RagService, PromptBuilder |
+
+**Upload Queue:**
+| Component | Scope | Deps |
+|-----------|-------|------|
+| `DocumentUploadQueue` | LazySingleton | DocsDao, ChunksDao, Parser, Chunker, Gecko, VectorStore |
+| `DocumentRepository` | LazySingleton | AppDatabase, DocumentUploadQueue |
 
 ---
 
-## 5. Vector Store - Chi tiết
+## 3. App Widget Tree
 
-Dùng SQLite, KHÔNG dùng thư viện vector database bên ngoài.
+```
+app.dart — _AppState
+  ├── GlobalKey<NavigatorState> _navigatorKey
+  ├── GoRouter (navigatorKey)
+  │    ├── /            → SessionListPage
+  │    ├── /chat/:id    → ChatPage(sessionId)  [BlocProvider<ChatBloc>(key)]
+  │    ├── /knowledge   → KnowledgePage
+  │    ├── /settings    → SettingsPage
+  │    └── /settings/models → ModelManagerPage
+  └── ValueListenableBuilder<ThemeMode> (themeModeNotifier)
+       └── MaterialApp.router
+            ├── builder: (context, child) → ModelOnboardingCoordinator(navigatorKey, child)
+            ├── theme:  Material3 Light
+            └── darkTheme: Material3 Dark
 
-```sql
-CREATE TABLE vectors (
-  id TEXT PRIMARY KEY,
-  chunk_id TEXT NOT NULL,
-  embedding BLOB NOT NULL,  -- Float32List serialized
-  created_at INTEGER NOT NULL
-);
+MultiBlocProvider (App level — 4 singleton blocs):
+  ├── ModelBloc      (dispatch StatusChecked ngay khi tạo)
+  ├── SessionBloc    (dispatch SessionsLoaded ngay khi tạo)
+  ├── KnowledgeBloc  (dispatch DocumentsLoaded ngay khi tạo)
+  └── SessionFilesCubit
 ```
 
-Cosine similarity tính trong Dart:
-```dart
-double cosineSimilarity(List<double> a, List<double> b) {
-  double dot = 0, normA = 0, normB = 0;
-  for (int i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  return dot / (sqrt(normA) * sqrt(normB));
-}
-```
-
-HNSW không khả dụng native → dùng brute-force search với SQLite, đủ dùng cho < 50,000 chunks.
+Việc đặt singleton blocs trong `MultiBlocProvider` ở App level (thay vì GetIt lifecycle) đảm bảo Bloc không bị dispose khi page pop (lỗi thường gặp với GetIt~Bloc).
 
 ---
 
-## 6. Dependency Injection
+## 4. Data Flow — Chat
 
-Dùng `get_it` package kết hợp `MultiBlocProvider` ở top-level `app.dart`:
-
-**Nguyên tắc quan trọng:**
-- **GetIt**: quản lý dependency graph (services, repositories, các bloc singleton)
-- **MultiBlocProvider ở app.dart**: nắm lifecycle cho các singleton bloc → tránh Bad state do BlocProvider tự động dispose bloc khi page pop
-- **ChatBloc**: là ngoại lệ — mỗi session cần 1 instance riêng, giữ `BlocProvider` ở `ChatPage` với `key: ValueKey('chat_$sessionId')`
-
-```dart
-// injection/service_locator.dart
-final sl = GetIt.instance;
-
-Future<void> setupLocator() async {
-  // Services (Singleton)
-  sl.registerLazySingleton<GemmaService>(() => GemmaServiceImpl());
-  sl.registerLazySingleton<GeckoService>(() => GeckoRetryService(GeckoServiceImpl()));
-  sl.registerLazySingleton<VectorStoreService>(() => VectorStoreServiceImpl(sl<AppDatabase>()));
-  sl.registerLazySingleton<DocumentParserService>(() => DocumentParserServiceImpl());
-  sl.registerLazySingleton<ChunkingService>(() => ChunkingServiceImpl());
-  sl.registerLazySingleton<ContextManagerService>(() => ContextManagerService(sl(), sl()));
-  sl.registerLazySingleton<PromptBuilderService>(() => PromptBuilderServiceImpl());
-
-  // Repositories (Singleton)
-  sl.registerLazySingleton<MessageRepository>(() => MessageRepositoryImpl(sl()));
-  sl.registerLazySingleton<SessionRepository>(() => SessionRepositoryImpl(sl()));
-  sl.registerLazySingleton<DocumentRepository>(() => DocumentRepositoryImpl(sl()));
-
-  // Blocs
-  // LazySingleton — lifecycle do MultiBlocProvider ở app.dart quản lý
-  sl.registerLazySingleton<ModelBloc>(() => ModelBloc(...));
-  sl.registerLazySingleton<SessionBloc>(() => SessionBloc(sl()));
-  sl.registerLazySingleton<KnowledgeBloc>(() => KnowledgeBloc(sl()));
-  // Factory — mỗi session cần instance riêng
-  sl.registerFactory<ChatBloc>(() => ChatBloc(...));
-}
+### ChatBloc States
+```
+ChatInitial → ChatLoading → ChatLoaded | ChatThinking | ChatStreaming → ChatLoaded | ChatError
+                                                    ↑ Stop
+                                                    StreamingCancelled → ChatLoaded
 ```
 
-**app.dart** triển khai `MultiBlocProvider`:
+| State | Fields | Description |
+|-------|--------|-------------|
+| `ChatInitial` | — | Chưa load session |
+| `ChatLoading` | — | Đang load messages từ DB |
+| `ChatLoaded` | messages, knowledgeScope | Sẵn sàng nhận input |
+| `ChatThinking` | messages, knowledgeScope | User msg saved, chờ RAG + prompt |
+| `ChatStreaming` | messages, streamingText, streamingId, ragResults?, knowledgeScope | Đang streaming từng token |
+| `ChatError` | message, needsModelDownload, messages, knowledgeScope | Lỗi (có thể kèm needsModelDownload flag) |
+
+### ChatBloc Events
+| Event | Trigger | Effect |
+|-------|---------|--------|
+| `SessionInitialized(sessionId)` | ChatPage mount | Load messages, hydrate KnowledgeScope, tạo Gemma session + replay history |
+| `SendMessageRequested(content)` | Send button | RAG → Build prompt → Stream response |
+| `StreamingCancelled` | Stop button | Save "(Đã dừng)" partial response |
+| `MessagesCleared` | Clear button | Delete messages |
+| `ModelBecameReady` | ModelBloc ready | Clear needsModelDownload error |
+| `KnowledgeScopeChanged(scope)` | Scope selector | Update session scope |
+
+### ChatBloc Constructor Dependencies
 ```dart
-@override
-Widget build(BuildContext context) {
-  return MultiBlocProvider(
-    providers: [
-      BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
-      BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
-      BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
-    ],
-    child: ValueListenableBuilder<ThemeMode>(...),
-  );
-}
+ChatBloc({
+  required MessageRepository messageRepo,
+  required SessionRepository sessionRepo,
+  required GemmaService gemmaService,
+  required ModelBloc modelBloc,
+  required MemoryStoreService memoryStore,
+  required SummaryService summaryService,
+  required RagService ragService,
+  required PromptBuilder promptBuilder,
+  int? contextWindow,
+})
+```
+
+### SendMessage Full Flow
+```
+1. Guard checks: isClosed? _currentSessionId? is ChatStreaming? _isWaitingForModel?
+2. If gemma not ready: subscribe ModelBloc, _isWaitingForModel=true, return
+3. Save user message → DB → emit ChatThinking
+4. RAG retrieval → RagService.retrieve(query, tokenBudget, scope, sessionId)
+5. Build prompt → PromptBuilder.build(question, ragContext, history, summary, memories)
+6. Ensure Gemma session exists (recreate if !hasActiveSession)
+7. Stream → emit.forEach(gemmaService.generateWithSession(prompt))
+   - Each token → emit ChatStreaming
+   - Complete → save assistant msg → emit ChatLoaded
+   - Error → closeSession → emit ChatError
+```
+
+### Session Initialization Flow
+```
+SessionInitialized(sessionId)
+  ├→ emit ChatLoading
+  ├→ load messages từ SQLite
+  ├→ hydrate KnowledgeScope từ session DB
+  ├→ Kiểm tra SessionMemory (summary)
+  │    ├→ Có summary → MemoryPromptFormatter.build(summary, memories)
+  │    │              → createSession(systemInstruction=summarized)
+  │    │              → replay recent messages (token-based, 15% context)
+  │    └→ Không summary → _createGemmaSessionWithHistory()
+  │                       → createSession("You are AgriAI...")
+  │                       → replay history (35% context budget, từ mới→cũ)
+  └→ emit ChatLoaded
 ```
 
 ---
 
-## 7. Error Handling Strategy
+## 5. Data Flow — RAG Ingestion
+
+```
+User uploads file (ChatPage 📎 or Knowledge Page)
+  └→ FilePicker (pdf, docx, txt, md, allowMultiple)
+       └→ insertDocument(status=pending)
+            └→ DocumentUploadQueue.enqueue(job)
+
+FIFO _processNext() → _processJob():
+  Parse    0.00 → 0.10    DocumentParserService.parse(file) → rawText
+  Chunk    0.10 → 0.20    ChunkingService.chunk(rawText, chunkSize=200, overlap=50) → chunks[]
+  Embed    0.20 → 0.95    GeckoService.embed(chunk) → vector[768] (per chunk, progressive %)
+  Insert   0.95 → 1.00    ChunksCompanion batch → Vectors insert batch
+  Complete 1.00            status=completed, chunkCount updated
+
+Granular progress stream → SessionFilesPanel + AttachedFilesBar
+  contract.pdf  [████████░░] 82%
+
+Gecko Embedding Guard (defensive):
+  if (!_gecko.isReady) throw UploadQueueException('...')
+  → status=failed, incrementRetryCount
+
+Chunk logging (thêm 12/06/2026):
+  [UploadQueue] Chunks: 4 chunks (chunkSize=200, overlap=50)
+  [UploadQueue] chunk[0] chars=752 tokens=301 preview="..."
+  Dùng estimateTokens() (cùng estimator với RAG/PromptBuilder)
+```
+
+---
+
+## 6. Data Flow — RAG Retrieval
+
+```
+RagService.retrieve(query, tokenBudget, scope, sessionId):
+  0. Early exit guard: _shouldSkipRag() → RagSkipReason enum
+     - tooShort: ≤2 từ, không ?, <15 ký tự
+     - greeting: hi/hello/chào/xin chào
+     - capability: bạn là ai/giúp gì/what can you do
+  1. Embed query → GeckoService.embed(query)
+  2. Filter document IDs theo KnowledgeScope (CHỈ status=completed)
+     - attachedOnly: getCompletedDocumentIdsBySessionId + refDocIds
+     - globalOnly: getCompletedGlobalDocumentIds()
+     - attachedAndGlobal: global + session + ref (all completed)
+  3. Nếu allowedDocIds rỗng → early return RagContext.empty
+  4. Vector search → VectorStoreService.search(topK:20, threshold:0.7, allowedDocIds)
+     2-step search: filter → preTopK(200) → cosine → re-rank → topK(20)
+  5. Log candidates: score, chars, tokens, preview (top 3)
+  6. Try-fit packing (VERSION=try_fit_v2):
+     - Hard caps: kMaxRagChunks=3, kMaxRagTokens=500
+     - effectiveCap = min(tokenBudget, kMaxRagTokens)
+     - continue nếu chunk > effectiveCap
+     - add nếu còn budget (greedy knapsack)
+     - safety guard khi đầy
+  7. Log packing: matched, packed, tokens, cap
+  8. Log RagTelemetry
+
+Return: RagContext(chunks, tokenCount, bestScore)
+```
+
+---
+
+## 7. Data Flow — Prompt Building
+
+```
+PromptBuilder.build(question, ragContext, history, sessionSummary, userMemories):
+  VERSION=dedup_v1
+
+  Ordering:
+    <start_of_turn>system
+      You are AgriAI...
+      === User Memory ===       (cross-session persona)
+      === Session Summary ===   (conversation state)
+    <end_of_turn>
+
+    === Recent Conversation === (history — budget-based truncation)
+      - kMaxHistoryTokens = 300
+      - Duyệt từ cuối lên đầu, gom messages trong budget
+      - estimateTokens() + role overhead
+
+    === Reference Documents === (RAG chunks — sát question)
+      [Document 1] chunkText
+      [Document 2] chunkText
+
+    === Current Question ===
+    <start_of_turn>user question <end_of_turn>
+    <start_of_turn>model
+```
+
+---
+
+## 8. Core Services
+
+### GemmaService (flutter_gemma 0.16.4)
+```
+API: Session-based (turn-based chat)
+  createSession(systemInstruction?) → addHistoryMessage(role, content)
+  → generateWithSession(userMessage) → Stream<String>
+
+maxTokens: 2048 (kGemmaMaxTokens)
+Backend: PreferredBackend.gpu (CPU fallback đang debug)
+Timeout: 120s
+
+Legacy API (dùng bởi SummaryService):
+  generateStream(prompt) — tạo session mới mỗi lần
+  generate(prompt) — tương tự, Future<String>
+
+⚠️ LiteRT LM constraint: Chỉ support 1 session tại 1 thời điểm.
+  Legacy generate() invalidates session → hasActiveSession guard ở ChatBloc.
+  generate()/generateStream() set _session=null trước createSession().
+
+P0 Logging (12/06/2026):
+  generateWithSession: sessionActive, promptLength, maxTokens, sessionHash
+  prompt head (500 chars), prompt tail (500 chars)
+  token[1..20] (first 20 tokens)
+  response preview (200 chars), total tokens
+  error log + closeSession
+```
+
+### GeckoService (flutter_gemma EmbeddingModel)
+```
+registerModel(modelPath, tokenizerPath) → initialize()
+  → embed(text) → List<double> (768-dim)
+
+TaskType.retrievalQuery cho query
+TaskType.retrievalDocument cho indexing
+
+FIFO lock: _runLocked<T>(fn) — Completer-based, tránh race GPU/FFI
+
+⚠️ Gecko_256_quant suspicion (12/06/2026):
+  Score ranking barely changes across different Vietnamese queries.
+  chunk[0] (giới thiệu chung) always top 1.
+  Cần test lại với chunkSize=200 sau khi fix GPU crash.
+```
+
+### VectorStoreService (SQLite Cosine Search)
+```
+Lưu vector dạng Float32List serialize → BLOB
+Search: brute-force cosine similarity
+Đủ dùng cho < 50,000 chunks
+
+2-step search:
+  1. Filter candidates bằng allowedDocumentIds
+  2. Pre-topK (200) → cosine similarity → re-rank → topK (20)
+```
+
+### ChunkingService
+```
+Interface: chunk(text, {chunkSize=500, overlap=100}) → List<String>
+Runtime default: chunkSize=200, overlap=50 (set trong DocumentUploadQueue)
+
+charsPerToken = 4 (chunker) vs 2.5 (estimator)
+Cố gắng cắt tại word boundary (space)
+```
+
+### MemoryStoreService + SummaryService — Auto Summary
+```
+Kiến trúc:
+  Gemma Session → Recent Messages (15%) → Summary (8%) → User Memories (2%) → RAG Documents
+
+Database tables:
+  SessionMemory: sessionId, summary, summaryVersion, msgCount, estTokens, runningTokenCount, updatedAt
+  UserMemory: namespace, key, value (composite PK)
+
+MemoryBudgetConfig (dynamic theo context window):
+  responseReserve:    25%
+  systemBudget:        5%
+  summaryBudget:       8% (clamp 100-500)
+  userMemoryBudget:    2%
+  recentConversation: 15%
+  summaryTrigger:     available * 0.65
+```
+
+### PromptBuilder (VERSION=dedup_v1)
+```
+History truncation: budget-based (kMaxHistoryTokens=300)
+  - Duyệt từ cuối lên đầu
+  - estimateTokens() + role overhead
+  - Selected reversed để giữ thứ tự thời gian
+```
+
+### DocumentUploadQueue — FIFO Pipeline
+```
+chunkSize=200, overlap=50 (runtime default 12/06/2026)
+Gecko Embedding Guard: throw UploadQueueException nếu Gecko chưa ready
+Chunk logging: chars, tokens (estimateTokens), preview (safe substring min 60)
+```
+
+---
+
+## 9. Error Handling
 
 ```
 AppException (base)
-├── ModelNotLoadedException    → Show "Download Model" screen
-├── InsufficientMemoryException → Show warning dialog
-├── DocumentParseException     → Show error snackbar
-├── EmbeddingException         → Show error, allow retry
-└── StorageException           → Show error, log
-```
+├── ModelNotLoadedException        → needsModelDownload: true (show "Download Model")
+├── ModelTimeoutException (mới)    → timeout 120s
+├── InsufficientMemoryException    → warning dialog
+├── DocumentParseException         → error snackbar
+├── EmbeddingException             → error, allow retry
+├── StorageException               → error, log
+└── UploadQueueException (mới)     → Gecko chưa ready, file upload fail
 
-Mọi lỗi đều được Bloc convert thành Error State, UI xử lý hiển thị.
+Runtime errors (non-AppException):
+  Bad state: Session is closed → FFI session invalidated by legacy generate()
+    → Guarded bởi hasActiveSession check tại ChatBloc dòng 389
+```
 
 ---
 
-## 8. Performance Targets
+## 10. Chat UI Architecture
 
-| Metric | Target |
-|--------|--------|
-| TTFT (Time to First Token) | < 2 giây |
-| Token/s | 10-25 token/s |
-| Embedding latency | < 200ms/chunk |
-| Search latency (10k chunks) | < 100ms |
-| App cold start | < 3 giây |
+```
+ChatPage (167 dòng, refactored 11/06/2026)
+  └── AppBar (ScopeSelector + ClearButton)
+  └── Column
+       ├── ModelNotInstalledBanner (BlocBuilder riêng)
+       ├── ChatBody (BlocBuilder)
+       │    └── MessageList (ScrollController + ListViewObserver)
+       │         ├── MessageBubble (MarkdownBody cho AI)
+       │         └── LastBubble (BlocBuilder riêng, buildWhen: streamingText)
+       │              ├── ChatThinking → ThinkingBubble (3 chấm)
+       │              └── ChatStreaming → MessageBubble(isStreaming: true)
+       └── AttachedFilesBar + ChatInputBar
 
-Device target: Snapdragon 8 Gen 2, Apple A17 Pro trở lên.
+Widgets tách riêng (11 files):
+  model_not_installed_banner, scope_selector, clear_button, chat_body,
+  error_banner, message_list, scroll_to_bottom_button, last_bubble,
+  thinking_bubble, attached_files_bar, chat_input_bar
+```
+
+### Auto-scroll
+```
+_isNearBottom: ListViewObserver.onObserve
+_scrollToBottom(): lần đầu vào chat, message mới, streaming (nếu _isNearBottom)
+```
+
+---
+
+## 11. Model Onboarding Coordinator
+
+```
+ModelOnboardingCoordinator (StatefulWidget) — App level
+  BlocListener<ModelBloc>: show confirm dialog khi model chưa download
+  listenWhen: !_promptCompleted && !_isDialogVisible && !_hasSeenOnboarding
+             && curr is ModelLoaded && gemmaInfo.status == notDownloaded
+
+Flow:
+  1. Confirm dialog → "Gemma (2.6GB) + Gecko (111MB)"
+  2. Dispatch cả GemmaDownloadStarted + GeckoDownloadStarted (song song)
+  3. Progress dialog (2 progress bars)
+  4. Hoàn tất → SnackBar "Model AI đã sẵn sàng!"
+  5. Lỗi → [Để sau] / [Thử lại]
+
+SharedPreferences: hasSeenModelOnboarding (set true khi dialog hiển thị)
+Navigator: Dùng GlobalKey<NavigatorState> truyền từ App
+```
+
+---
+
+## 12. Token Estimation
+
+```
+File: lib/core/utils/token_estimator.dart
+
+estimateTokens(text): chars / 2.5 (heuristic cho tiếng Việt)
+estimateMessageTokens(text): estimateTokens(text) + 5 (role overhead)
+
+Dùng bởi:
+  - RAG packing (try-fit)
+  - PromptBuilder history truncation
+  - Context Budget calculation
+  - UploadQueue chunk logging
+```
+
+---
+
+## 13. Context Budget (Runtime Dynamic)
+
+```
+kGemmaMaxTokens = 2048
+historyBudgetRatio  = 0.35 (≈717 tok)
+responseBudgetRatio = 0.25 (≈512 tok)
+systemBudgetRatio   = 0.10 (≈205 tok)
+ragBudget = max(0, 2048 - history - response - system - question)
+
+KHÔNG dùng hardcode totalBudget=8000 cũ.
+```
+
+---
+
+## 14. Knowledge Management
+
+### KnowledgeScope
+```dart
+enum KnowledgeScope { attachedOnly, globalOnly, attachedAndGlobal }
+```
+Lưu theo conversation, persist qua session.
+
+### RAG Filter (chỉ completed)
+```
+Filter trước ranking, không filter sau topK:
+  attachedOnly: getCompletedDocumentIdsBySessionId + getCompletedDocumentIdsByIds(refDocIds)
+  globalOnly: getCompletedGlobalDocumentIds()
+  attachedAndGlobal: global + session + ref (all completed)
+```
+
+### Ownership-based Delete/Detach
+```
+detachDocument(documentId):
+  if doc.sessionId == sessionId → deleteDocument (cascade chunks + vectors)
+  else → refsDao.detachDocument (chỉ xoá session_document_refs)
+```
+
+### Cascade Delete
+```
+Delete Session → Sessions ON DELETE CASCADE
+  → Documents (sessionId) → Chunks (documentId) → Vectors (xoá thủ công qua DAO)
+```
+
+---
+
+## 15. Version Markers (Runtime Verification)
+
+| File | Marker | Purpose | Added |
+|------|--------|---------|-------|
+| `rag_service_impl.dart` | `VERSION=try_fit_v2` | Verify RAG packing code đang chạy | 12/06/2026 |
+| `prompt_builder_service.dart` | `VERSION=dedup_v1` | Verify PromptBuilder code đang chạy | 12/06/2026 |
+
+---
+
+## 16. Performance Observations (thực tế từ runtime)
+
+| Metric | Giá trị thực tế |
+|--------|----------------|
+| TTFT (GPU, ~2500 token prompt) | 5-10 giây |
+| Token/s (GPU, Gemma 4-E2B) | ~7-8 tok/s |
+| Embedding latency (Gecko) | ~850ms/chunk |
+| Search latency (4 chunks) | < 100ms |
+| App cold start (bao gồm model init) | ~13 giây |
+
+⚠️ GPU crash khi prompt có RAG chunks (đang điều tra, 12/06/2026).
+
+---
+
+## 17. Database Schema Highlights
+
+```sql
+-- Documents
+documents: id TEXT PK, name, path, sizeBytes, mimeType,
+           sessionId TEXT? FK→sessions, status INT (IndexStatus),
+           progress REAL, errorMessage TEXT?, retryCount INT,
+           lastProcessedAt DATETIME?
+
+-- Sessions
+sessions: id TEXT PK, knowledgeScope INT (0/1/2)
+
+-- Session Document Refs (junction)
+session_document_refs: sessionId FK, documentId FK, attachedAt
+                       PK: (sessionId, documentId)
+
+-- Chunks
+chunks: id TEXT PK, documentId FK, chunkIndex INT,
+        chunkText TEXT, tokenCount INT, createdAt
+
+-- Vectors
+vectors: id TEXT PK ('v_' + chunkId), chunkId FK, embedding BLOB, createdAt
+
+-- Messages
+messages: id TEXT PK, sessionId FK, role TEXT, content TEXT, createdAt
+
+-- Session Memory
+session_memory: sessionId PK FK, summary TEXT, summaryVersion INT,
+                msgCount INT, estTokens INT, runningTokenCount INT, updatedAt
+
+-- User Memory
+user_memory: namespace TEXT, key TEXT, value TEXT, updatedAt
+             PK: (namespace, key)

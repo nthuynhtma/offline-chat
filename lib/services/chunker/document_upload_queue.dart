@@ -176,7 +176,7 @@ class DocumentUploadQueue {
 
       // ─── Step 2: Chunk (0.10 → 0.20) ──────────────────────────────────
       await _setProgress(job.documentId, 0.15);
-      const int chunkSize = 250;
+      const int chunkSize = 200;
       const int chunkOverlap = 50;
       final chunks = _chunker.chunk(
         rawText,

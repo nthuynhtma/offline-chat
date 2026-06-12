@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:offline_chat/core/constants/model_constants.dart';
@@ -181,6 +182,21 @@ class GemmaServiceImpl implements GemmaService {
     if (_model == null) throw const ModelNotLoadedException();
     if (_session == null) throw const ModelNotLoadedException();
 
+    // Log P0: session info + prompt
+    log_util.log.i('[Gemma] generateWithSession: '
+        'sessionActive=$hasActiveSession '
+        'promptLength=${userMessage.length} '
+        'maxTokens=${_model!.maxTokens}');
+    log_util.log.i('[Gemma] sessionHash=${_session.hashCode}');
+
+    // Prompt head/tail (safe substring)
+    final headLen = min(500, userMessage.length);
+    log_util.log.i('[Gemma] prompt head:\n${userMessage.substring(0, headLen)}');
+    if (userMessage.length > 500) {
+      final tailStart = max(0, userMessage.length - 500);
+      log_util.log.i('[Gemma] prompt tail:\n${userMessage.substring(tailStart)}');
+    }
+
     try {
       // Add user message vào session
       await _session!.addQueryChunk(
@@ -194,11 +210,25 @@ class GemmaServiceImpl implements GemmaService {
           sink.close();
         },
       );
+      var tokenCount = 0;
+      final responseBuffer = StringBuffer();
       await for (final response in stream) {
+        tokenCount++;
+        responseBuffer.write(response);
+        if (tokenCount <= 20) {
+          log_util.log.d('[Gemma] token[$tokenCount]=$response');
+        }
         yield response;
       }
+
+      // Log P0: response summary
+      final responseStr = responseBuffer.toString();
+      log_util.log.i('[Gemma] generateWithSession hoàn tất: $tokenCount tokens');
+      log_util.log.i('[Gemma] response preview: '
+          '${responseStr.substring(0, min(200, responseStr.length))}');
     } catch (e) {
       // Nếu session bị lỗi, đóng và tạo lại cho lần sau
+      log_util.log.w('[Gemma] generateWithSession lỗi: $e');
       await _closeSessionInternal();
       rethrow;
     }

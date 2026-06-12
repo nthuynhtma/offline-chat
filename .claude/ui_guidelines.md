@@ -1,10 +1,9 @@
 # UI/UX Guidelines & Widget Catalog
 
-## Design System
+## Design Tokens
 
-### Colors
+### Colors (`core/constants/app_colors.dart`)
 ```dart
-// core/constants/app_colors.dart
 class AppColors {
   // Light mode
   static const primaryLight    = Color(0xFF1A73E8);
@@ -28,15 +27,7 @@ class AppColors {
 }
 ```
 
-### Typography
-```dart
-// Dùng system font (San Francisco trên iOS, Roboto trên Android)
-const TextStyle bodyText = TextStyle(fontSize: 16, height: 1.5);
-const TextStyle caption  = TextStyle(fontSize: 13, color: AppColors.subtleLight);
-const TextStyle heading  = TextStyle(fontSize: 18, fontWeight: FontWeight.w600);
-```
-
-### Spacing
+### Spacing (`core/constants/app_spacing.dart`)
 ```dart
 class AppSpacing {
   static const xs = 4.0;
@@ -49,192 +40,181 @@ class AppSpacing {
 
 ---
 
-## Widgets Catalog
+## Widget Catalog (Refactored 11/06/2026)
+
+### ChatPage Structure
+```
+ChatPage (167 dòng, lib/features/chat/views/chat_page.dart)
+  └── ChatView (StatefulWidget)
+       ├── AppBar
+       │    ├── ScopeSelector (PopupMenuButton, KnowledgeScope)
+       │    └── ClearButton (BlocBuilder riêng, buildWhen: streaming/thinking state change)
+       └── Column
+            ├── ModelNotInstalledBanner (lib/features/chat/widgets/)
+            ├── ChatBody (BlocBuilder, buildWhen: trừ ChatThinking→ChatThinking)
+            │    └── MessageList (StatefulWidget, ScrollController + ListViewObserver)
+            │         ├── MessageBubble (user: right-aligned blue, assistant: left-aligned gray)
+            │         └── LastBubble (BlocBuilder riêng, buildWhen: streamingText change)
+            │              ├── ChatThinking → ThinkingBubble (3 chấm animation)
+            │              └── ChatStreaming → MessageBubble(isStreaming: true)
+            ├── AttachedFilesBar (StatefulWidget, BlocBuilder<SessionFilesCubit>)
+            │    └── FileChip (icon trạng thái + tên + progress % + popup menu)
+            └── ChatInputBar (BlocListener → setState local _isStreaming)
+```
 
 ### MessageBubble
 ```dart
-// Hiển thị message của user hoặc assistant
-// User: bubble bên phải, màu xanh
-// Assistant: bubble bên trái, màu xám nhạt
+// lib/features/chat/views/message_bubble.dart
+// User: right-aligned, blue background (#1A73E8), white text
+// Assistant: left-aligned, gray background (#F1F3F4), dark text (#202124)
+// AI messages rendered with MarkdownBody (flutter_markdown_plus)
+// Streaming messages show cursor-like animation
 
 class MessageBubble extends StatelessWidget {
   final MessageModel message;
+  final bool isLast;      // true nếu là message mới nhất
   final bool isStreaming; // true khi đang stream
-
-  // Layout:
-  // [Avatar] [BubbleContent] [Timestamp]  ← assistant
-  //          [Timestamp] [BubbleContent]  ← user (right aligned)
+  // MarkdownBody cho assistant, plain Text cho user
 }
 ```
 
-### StreamingIndicator
+### ThinkingBubble (3 chấm animation)
 ```dart
-// 3 chấm nhảy khi model đang xử lý
-// Hiển thị trước khi token đầu tiên xuất hiện
-class StreamingIndicator extends StatefulWidget {
-  // Animated dots: ● ● ●
-}
+// lib/features/chat/widgets/thinking_bubble.dart
+// Hiển thị 3 dots animation khi model đang xử lý
+// Chỉ emit trước khi token đầu tiên xuất hiện
 ```
 
 ### ChatInputBar
 ```dart
+// lib/features/chat/widgets/chat_input_bar.dart
 // Text field + send button
-// Disabled khi: model chưa load, đang streaming
-// Multiline support
-// Send on Enter (configurable)
-class ChatInputBar extends StatefulWidget {
-  final VoidCallback? onSend;
-  final bool enabled;
-  // Height: tự expand, max 5 dòng
-}
+// Disabled khi: model chưa load, đang streaming, Gecko chưa ready
+// 📎 button: disabled khi Gecko chưa ready (tooltip: "Preparing AI models...")
+// Multiline support, max 5 dòng
+// Auto-focus khi vào chat page
 ```
 
-### SessionCard
+### AttachedFilesBar
 ```dart
-// Hiển thị 1 session trong list
-// Title (hoặc "New Chat" nếu không có)
-// Last message preview (1 dòng)
-// Timestamp
-// Swipe to delete
-class SessionCard extends StatelessWidget {
-  final SessionModel session;
-  final bool isActive;
-  final VoidCallback onTap;
-  final VoidCallback onDelete;
-}
+// lib/features/chat/widgets/attached_files_bar.dart
+// StatefulWidget, BlocBuilder<SessionFilesCubit>
+// Hiển thị file chips đã upload trong session
+// FileChip: icon + tên + progress bar (nếu đang indexing) + popup menu (Retry/Remove)
 ```
 
-### DocumentCard
+### ClearButton
 ```dart
-// Hiển thị 1 document trong knowledge base
-// Icon theo loại file (PDF/DOCX/TXT)
-// Name + size
-// Chunk count + status (indexed/indexing/error)
-// Delete button
-class DocumentCard extends StatelessWidget {
-  final DocumentModel document;
-  final VoidCallback onDelete;
-  final VoidCallback onReindex;
-}
+// lib/features/chat/widgets/clear_button.dart
+// BlocBuilder riêng, buildWhen: chỉ rebuild khi streaming/thinking state thay đổi
+// Tránh rebuild toàn bộ AppBar khi streaming
 ```
 
-### ModelStatusCard
+### ScopeSelector
 ```dart
-// Hiển thị trạng thái Gemma và Gecko
-// Status: Not Downloaded | Downloading (%) | Ready
-// Download button nếu chưa có
-// Version info nếu đã có
-class ModelStatusCard extends StatelessWidget {
-  final String modelName;    // "Gemma 4B" hoặc "Gecko 110M"
-  final ModelStatus status;
-  final double? downloadProgress; // null nếu không download
-  final VoidCallback? onDownload;
-}
+// lib/features/chat/widgets/scope_selector.dart
+// PopupMenuButton, chọn KnowledgeScope
+// attachedOnly / globalOnly / attachedAndGlobal
+// ScopeOption: icon + tên cho mỗi option
 ```
 
-### IndexingProgressBar
+### ScrollToBottomButton
 ```dart
-// Linear progress bar khi indexing document
-// Hiển thị: "Đang xử lý... 45/120 chunks"
-class IndexingProgressBar extends StatelessWidget {
-  final String documentName;
-  final double progress; // 0.0 - 1.0
-  final int currentChunk;
-  final int totalChunks;
-}
+// lib/features/chat/widgets/scroll_to_bottom_button.dart
+// AnimatedOpacity + AnimatedSlide
+// "Mới nhất" button, xuất hiện khi người dùng scroll lên
+// Auto-scroll khi _isNearBottom (phát hiện qua ListViewObserver)
 ```
 
 ---
 
 ## Screen Layouts
 
-### SessionListPage
+### SessionListPage (`/`)
 ```
 AppBar: "Offline Chat"  [Settings icon]
 Body:
-  FAB hoặc Button: "+ New Chat"
-  ListView:
-    SessionCard(session1)  [active - highlighted]
-    SessionCard(session2)
-    ...
-  Empty state nếu không có session:
-    Icon (chat bubble)
-    "Chưa có cuộc trò chuyện"
-    Button: "Bắt đầu chat"
+  FloatingActionButton: "+ New Chat"
+  ListView: SessionCard(session)
+  Empty state: icon + "Chưa có cuộc trò chuyện" + "Bắt đầu chat" button
 ```
 
-### ChatPage
+### ChatPage (`/chat/:sessionId`)
 ```
-AppBar: [Back] [Session title - editable] [Knowledge icon]
+AppBar: [Back] [Session title] [ScopeSelector]
 Body:
-  [ModelNotReadyBanner - nếu model chưa load]
-  Expanded: MessageList
-    MessageBubble (user)
-    MessageBubble (assistant)
-    StreamingMessageBubble (khi đang stream)
-  ChatInputBar
+  [ModelNotInstalledBanner - nếu model chưa tải]
+  Column
+    Expanded: MessageList
+      - MessageBubble(user)
+      - MessageBubble(assistant)
+      - LastBubble (streaming/thinking)
+    [AttachedFilesBar - nếu có file đang upload]
+    ChatInputBar
 ```
 
-### KnowledgePage
+### KnowledgePage (`/knowledge`)
 ```
 AppBar: [Back] "Knowledge Base"
 Body:
-  Button: "Import tài liệu"
+  "Import tài liệu" button
   [IndexingProgressBar - nếu đang index]
-  ListView:
-    DocumentCard(doc1)
-    DocumentCard(doc2)
-    ...
-  Empty state nếu không có document:
-    Icon (document)
-    "Chưa có tài liệu nào"
-    Button: "Import PDF/DOCX/TXT"
+  ListView: DocumentCard
+  Empty state: icon + "Chưa có tài liệu" + "Import PDF/DOCX/TXT" button
 ```
 
-### ModelManagerPage
+### SessionFilesPanel (Bottom Sheet)
+```
+// lib/features/knowledge/views/session_files_panel.dart
+// Bottom sheet từ ChatPage 📎
+// List file đã upload trong session
+// FileChip: icon + tên + progress bar + status label
+// [Pending] [Processing 45%] [Completed ✅] [Failed ❌]
+// Retry button nếu failed
+```
+
+### ModelManagerPage (`/settings/models`)
 ```
 AppBar: [Back] "Quản lý Model"
 Body:
   Section "Language Model":
-    ModelStatusCard(Gemma 4B IT)
-    Size: 2.8 GB
-    [Download button / Progress / ✅ Ready]
-
+    ModelStatusCard(Gemma 4-E2B IT) — 2.6 GB
+    [Download / Progress / ✅ Ready]
   Section "Embedding Model":
-    ModelStatusCard(Gecko 110M)
-    Size: 440 MB
-    [Download button / Progress / ✅ Ready]
-
-  Note: "Models được lưu trên thiết bị và không bao giờ được gửi lên server"
+    ModelStatusCard(Gecko 256 quant) — 111 MB
+    [Download / Progress / ✅ Ready]
+  Note: "Models được lưu trên thiết bị"
 ```
 
 ---
 
-## Navigation Structure
+## Navigation
 
-```
-/ (SessionListPage)
-├── /chat/:sessionId  (ChatPage)
-│   └── /knowledge    (KnowledgePage - bottom sheet hoặc page)
-└── /settings         (SettingsPage)
-    └── /models        (ModelManagerPage)
+### Routes (go_router)
+```dart
+/              → SessionListPage
+/chat/:id      → ChatPage(sessionId)
+/knowledge     → KnowledgePage
+/settings      → SettingsPage
+/settings/models → ModelManagerPage
 ```
 
-Dùng `go_router`:
-```yaml
-dependencies:
-  go_router: ^14.x
+### Architecture
+```dart
+// app.dart - StatefulWidget
+// GoRouter(navigatorKey: _navigatorKey)
+// MaterialApp.router(builder: (context, child) => ModelOnboardingCoordinator(...))
+// MultiBlocProvider app level: ModelBloc, SessionBloc, KnowledgeBloc, SessionFilesCubit
 ```
 
 ---
 
 ## UX Rules
 
-1. **Loading states**: Mọi async action đều cần loading indicator
-2. **Error feedback**: Mọi error đều show snackbar hoặc banner, không bao giờ silent fail
-3. **Empty states**: Mọi list đều có empty state với hướng dẫn hành động
-4. **Streaming feel**: Cursor nhấp nháy khi đang stream (như terminal)
-5. **Haptic feedback**: Khi send message thành công
-6. **Swipe actions**: Swipe left để delete session/document
-7. **Pull to refresh**: Không cần (data local, realtime qua Streams)
-8. **Keyboard behavior**: `resizeToAvoidBottomInset: true` trên ChatPage
+1. **Loading states**: Mọi async action đều có loading indicator
+2. **Error feedback**: Mọi error đều show snackbar/banner, không silent fail
+3. **Empty states**: Mọi list đều có empty state + hướng dẫn hành động
+4. **Streaming feel**: ThinkingBubble (3 chấm) → streaming text (từng token)
+5. **Rebuild optimization**: Tách LastBubble + ChatBody riêng (buildWhen), tránh rebuild toàn bộ
+6. **Keyboard**: `resizeToAvoidBottomInset: true` trên ChatPage
+7. **Model onboarding**: Dialog lần đầu → progress bars (Gemma + Gecko song song) → SnackBar

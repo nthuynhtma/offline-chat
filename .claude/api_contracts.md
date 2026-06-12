@@ -8,56 +8,90 @@
 
 ```dart
 abstract interface class GemmaService {
-  /// Khởi tạo model, load vào memory
-  /// Throws [ModelNotLoadedException] nếu file không tồn tại
-  Future<void> initialize(String modelPath);
-
-  /// Check model đã load chưa
+  /// Initialize Gemma model.
+  Future<void> initialize({String? modelPath, int maxTokens = kGemmaMaxTokens});
   bool get isReady;
-
-  /// Unload model khỏi memory
   Future<void> dispose();
 
-  /// Generate response theo kiểu streaming
-  /// [prompt] là prompt hoàn chỉnh đã build sẵn
-  /// Yields từng token string
+  /// Legacy: full prompt → new session → generate → close session.
   Stream<String> generateStream(String prompt);
-
-  /// Generate toàn bộ response (non-streaming)
   Future<String> generate(String prompt);
+
+  /// Session-based API (turn-based, giữ session giữa các request).
+  Future<void> createSession({String? systemInstruction});
+  Future<void> addHistoryMessage(String role, String content);
+  Stream<String> generateWithSession(String userMessage);
+  Future<void> closeSession();
+  bool get hasActiveSession;
 }
 ```
+
+Implementation: `GemmaServiceImpl` — dùng flutter_gemma 0.16.4 LiteRT-LM.
 
 ---
 
 ### GeckoService
 
 ```dart
-/// Sử dụng flutter_gemma EmbeddingModel API (KHÔNG dùng tflite_flutter Interpreter).
-/// flutter_gemma tự quản lý tokenizer (SentencePiece) + inference + normalization.
+/// Dùng flutter_gemma EmbeddingModel API (KHÔNG dùng tflite_flutter).
 abstract interface class GeckoService {
-  /// Đăng ký model + tokenizer với flutter_gemma qua installEmbedder().
-  /// Gọi 1 lần sau khi cả 2 file đã được download xuống disk.
   Future<void> registerModel({
     required String modelPath,
     required String tokenizerPath,
   });
-
-  /// Initialize embedding model lấy từ FlutterGemma.getActiveEmbedder().
-  /// Không cần path — flutter_gemma tự quản lý.
   Future<void> initialize();
-
   bool get isReady;
-
   Future<void> dispose();
 
-  /// Embed một đoạn text → vector (query mode, TaskType.retrievalQuery)
+  /// Embed một đoạn text → vector (TaskType.retrievalQuery)
   Future<List<double>> embed(String text);
 
-  /// Embed nhiều đoạn cùng lúc (batch, document mode TaskType.retrievalDocument)
+  /// Embed nhiều đoạn cùng lúc (TaskType.retrievalDocument)
   Future<List<List<double>>> embedBatch(List<String> texts);
 }
 ```
+
+Implementation: `GeckoServiceImpl` + `GeckoRetryService` wrapper.
+FIFO lock: `_runLocked<T>(fn)` — Completer-based, tránh race GPU/FFI.
+
+---
+
+### RagService
+
+```dart
+abstract interface class RagService {
+  Future<RagContext> retrieve({
+    required String query,
+    required int tokenBudget,
+    required KnowledgeScope scope,
+    String? sessionId,
+  });
+}
+```
+
+**RagContext:**
+```dart
+class RagContext {
+  final List<SearchResult> chunks;  // try-fit packed
+  final int tokenCount;
+  final double? bestScore;
+  bool get hasContext => chunks.isNotEmpty;
+}
+```
+
+**RagServiceImpl pipeline:**
+```
+0. shouldSkipRag() guard → RagSkipReason (tooShort/greeting/capability)
+1. Embed query → GeckoService
+2. Filter completed documents theo KnowledgeScope
+3. Nếu rỗng → early return RagContext.empty
+4. Vector search → topK:20, threshold:0.7
+5. Log candidates (top 3): score, chars, tokens, preview
+6. Try-fit packing (kMaxRagChunks=3, kMaxRagTokens=500)
+7. Log packing + RagTelemetry
+```
+
+VERSION=try_fit_v2
 
 ---
 
@@ -65,47 +99,34 @@ abstract interface class GeckoService {
 
 ```dart
 abstract interface class VectorStoreService {
-  /// Lưu vector cho một chunk
-  Future<void> insert({
-    required String chunkId,
-    required List<double> embedding,
-  });
-
-  /// Lưu nhiều vectors cùng lúc
+  Future<void> insert({required String chunkId, required List<double> embedding});
   Future<void> insertBatch(List<VectorEntry> entries);
 
-  /// Tìm top-K chunks gần nhất với queryVector
-  /// Chỉ trả về kết quả có score >= threshold
   Future<List<SearchResult>> search({
     required List<double> queryVector,
     int topK = 5,
     double threshold = 0.7,
+    Set<String>? allowedDocumentIds,  // filter trước ranking
   });
 
-  /// Xóa vectors theo danh sách chunk IDs
   Future<void> deleteByChunkIds(List<String> chunkIds);
-
-  /// Tổng số vectors
   Future<int> count();
 }
 
 class VectorEntry {
   final String chunkId;
   final List<double> embedding;
-  const VectorEntry({required this.chunkId, required this.embedding});
 }
 
 class SearchResult {
   final String chunkId;
   final double score;       // cosine similarity [0, 1]
-  final String chunkText;   // đã join từ Chunks table
-  const SearchResult({
-    required this.chunkId,
-    required this.score,
-    required this.chunkText,
-  });
+  final String chunkText;
 }
 ```
+
+Implementation: `VectorStoreServiceImpl` — SQLite brute-force cosine similarity.
+2-step search: filter → preTopK(200) → cosine → re-rank → topK(20).
 
 ---
 
@@ -113,12 +134,8 @@ class SearchResult {
 
 ```dart
 abstract interface class DocumentParserService {
-  /// Parse file về raw text
-  /// Hỗ trợ: .pdf, .docx, .txt, .md
-  /// Throws [DocumentParseException] nếu không parse được
+  /// Parse file về raw text. Hỗ trợ: .pdf, .docx, .txt, .md
   Future<String> parse(String filePath);
-
-  /// Check file type có support không
   bool isSupported(String filePath);
 }
 ```
@@ -129,7 +146,7 @@ abstract interface class DocumentParserService {
 
 ```dart
 abstract interface class ChunkingService {
-  /// Chia text thành chunks với sliding window
+  /// Chia text thành chunks với sliding window.
   /// [chunkSize] tính theo xấp xỉ token (~4 ký tự = 1 token)
   /// [overlap] số token chồng lặp giữa 2 chunk liền kề
   List<String> chunk(
@@ -140,71 +157,106 @@ abstract interface class ChunkingService {
 }
 ```
 
+Runtime default: chunkSize=200, overlap=50 (set trong DocumentUploadQueue).
+
 ---
 
-### ContextManagerService
+### PromptBuilder
 
 ```dart
-abstract interface class ContextManagerService {
-  static const int totalBudget = 8000;
-  static const int ragBudget   = 4000;
-  static const int historyBudget = 3000;
-  static const int questionBudget = 1000;
-
-  /// Build context từ RAG results + conversation history
-  Future<BuiltContext> buildContext({
+abstract interface class PromptBuilder {
+  Future<String> build({
     required String question,
-    required String sessionId,
-    required List<SearchResult> ragResults,
-  });
-}
-
-class BuiltContext {
-  final String question;
-  final List<SearchResult> relevantChunks;
-  final List<MessageModel> history;
-  final bool historyWasTrimmed;
-  final int estimatedTokens;
-
-  const BuiltContext({
-    required this.question,
-    required this.relevantChunks,
-    required this.history,
-    required this.historyWasTrimmed,
-    required this.estimatedTokens,
+    required RagContext ragContext,
+    required List<MessageModel> history,
+    String? sessionSummary,
+    List<UserMemory> userMemories,
   });
 }
 ```
 
----
-
-### PromptBuilderService
-
-```dart
-abstract interface class PromptBuilderService {
-  /// Build prompt hoàn chỉnh từ context
-  String build(BuiltContext context);
-}
-```
-
-Template mặc định:
+Ordering:
 ```
 <start_of_turn>system
-You are a helpful assistant. Answer in the same language as the user's question.
-{% if context.relevantChunks.isNotEmpty %}
-Use the following context to answer:
-
-{relevant_chunks}
-{% endif %}
+  You are AgriAI...
+  === User Memory ===       (cross-session persona)
+  === Session Summary ===   (conversation state)
 <end_of_turn>
-{% for message in context.history %}
-<start_of_turn>{{ message.role }}
-{{ message.content }}<end_of_turn>
-{% endfor %}
-<start_of_turn>user
-{{ question }}<end_of_turn>
+
+=== Recent Conversation === (history — budget-based, kMaxHistoryTokens=300)
+=== Reference Documents === (RAG chunks)
+=== Current Question ===
+<start_of_turn>user question <end_of_turn>
 <start_of_turn>model
 ```
+
+VERSION=dedup_v1
+
+---
+
+### MemoryStoreService
+
+```dart
+abstract interface class MemoryStoreService {
+  // SessionMemory
+  Future<SessionMemoryRow?> getSessionMemory(String sessionId);
+  Future<void> upsertSessionMemory(SessionMemoryCompanion memory);
+  Future<void> updateRunningTokenCount(String sessionId, int count);
+
+  // UserMemory
+  Future<List<UserMemoryRow>> getAllUserMemories();
+  Future<void> upsertUserMemory(UserMemoryCompanion memory);
+}
+```
+
+### SummaryService
+
+```dart
+abstract interface class SummaryService {
+  /// Incremental summarize: old summary + new messages → new summary
+  Future<SummaryResult> summarize(String sessionId, {String? currentSummary, required List<MessageModel> newMessages});
+
+  /// Extract user memory từ conversation
+  Future<List<UserMemoryExtract>> extractUserMemories(List<MessageModel> messages);
+}
+```
+
+---
+
+### DocumentUploadQueue
+
+```dart
+class DocumentUploadJob {
+  final String documentId;
+  final String filePath;
+  final String name;
+  final int sizeBytes;
+  final String mimeType;
+  final String? sessionId;
+}
+
+class DocumentUploadResult {
+  final String documentId;
+  final bool success;
+  final int chunkCount;
+  final String? error;
+}
+
+class DocumentUploadQueue {
+  QueueState get state;
+  Stream<QueueState> get stateStream;
+  Stream<DocumentUploadResult> get resultStream;
+  int get pendingCount;
+
+  String enqueue(DocumentUploadJob job);
+  String enqueuePriority(DocumentUploadJob job);
+  Future<void> retry(String documentId);
+  void dispose();
+}
+```
+
+Pipeline: Parse → Chunk(chunkSize=200, overlap=50) → Embed → Insert → Complete.
+Granular progress 0.0→1.0 streamed qua DB + resultStream.
 
 ---
 
@@ -219,6 +271,7 @@ abstract interface class SessionRepository {
   Future<SessionModel?> getSessionById(String id);
   Future<SessionModel> createSession({String? title});
   Future<void> updateSessionTitle(String id, String title);
+  Future<void> updateSessionKnowledgeScope(String id, KnowledgeScope scope);
   Future<void> deleteSession(String id);
   Future<void> updateSessionTimestamp(String id);
 }
@@ -237,6 +290,7 @@ abstract interface class MessageRepository {
     required String content,
   });
   Future<void> deleteMessagesBySession(String sessionId);
+  Future<void> updateMessageContent(String id, String content);  // for partial response
 }
 ```
 
@@ -246,7 +300,7 @@ abstract interface class MessageRepository {
 abstract interface class DocumentRepository {
   Future<List<DocumentModel>> getAllDocuments();
   Stream<List<DocumentModel>> watchAllDocuments();
-  Future<DocumentModel> importDocument(String filePath);
+  Future<DocumentModel> importDocumentWithProgress(String filePath, {String? sessionId});
   Future<void> deleteDocument(String id);
   Future<void> reindexDocument(String id);
 }
@@ -260,67 +314,50 @@ abstract interface class DocumentRepository {
 
 ```
 Events:
-  SessionInitialized(sessionId)     → load messages, set active session
-  SendMessageRequested(content)     → gửi message, stream response
-  StreamingCancelled()              → cancel stream
-  MessagesCleared()                 → xóa toàn bộ messages của session
+  SessionInitialized(sessionId)
+  SendMessageRequested(content)
+  StreamingCancelled()
+  MessagesCleared()
+  ModelBecameReady()
+  KnowledgeScopeChanged(scope)
 
 States:
-  ChatInitial
-  ChatLoading
-  ChatLoaded(messages: List<MessageModel>)
-  ChatStreaming(messages: List<MessageModel>, streamingText: String, streamingId: String)
-  ChatError(message: String, needsModelDownload: bool)
-```
-
-### SessionBloc
-
-```
-Events:
-  SessionsLoaded()           → load danh sách sessions
-  SessionCreated()           → tạo session mới
-  SessionSelected(id)        → chọn session
-  SessionDeleted(id)         → xóa session
-  SessionTitleUpdated(id, title)
-
-States:
-  SessionInitial
-  SessionLoading
-  SessionLoaded(sessions: List<SessionModel>, activeSessionId: String?)
-  SessionError(message: String)
-```
-
-### KnowledgeBloc
-
-```
-Events:
-  DocumentsLoaded()
-  DocumentImportRequested(filePath)
-  DocumentDeleteRequested(id)
-  DocumentReindexRequested(id)
-
-States:
-  KnowledgeInitial
-  KnowledgeLoading
-  KnowledgeLoaded(documents: List<DocumentModel>)
-  KnowledgeIndexing(documentId: String, progress: double)  // 0.0 - 1.0
-  KnowledgeError(message: String)
+  ChatInitial → ChatLoading → ChatLoaded | ChatThinking | ChatStreaming → ChatLoaded | ChatError
+                                                    ↑ StreamingCancelled
 ```
 
 ### ModelBloc
 
 ```
 Events:
-  StatusChecked()                        → kiểm tra trạng thái model files
-  GemmaDownloadStarted()                 → bắt đầu download Gemma
-  GeckoDownloadStarted()                 → bắt đầu download Gecko + tokenizer
-  DownloadCancelled(fileName)            → huỷ download 1 file
+  StatusChecked()
+  GemmaDownloadStarted()
+  GeckoDownloadStarted()
+  DownloadCancelled(fileName)
 
 States:
-  ModelInitial
-  ModelLoading
-  ModelLoaded(gemmaInfo, geckoInfo, gemmaReady: bool, geckoReady: bool)
-  ModelError(message: String)
+  ModelInitial → ModelLoading → ModelLoaded(gemmaInfo, geckoInfo, gemmaReady, geckoReady) → ModelError
+```
+
+### SessionBloc
+
+```
+Events: SessionsLoaded, SessionCreated, SessionDeleted, SessionTitleUpdated
+States: SessionInitial, SessionLoading, SessionLoaded, SessionError
+```
+
+### KnowledgeBloc
+
+```
+Events: DocumentsLoaded, _QueueResultArrived, DocumentDeleteRequested
+States: KnowledgeInitial, KnowledgeLoading, KnowledgeLoaded, KnowledgeIndexing, KnowledgeError
+```
+
+### SessionFilesCubit
+
+```
+State: SessionFilesLoaded(files, queueState, pendingCount)
+Methods: detachDocument(documentId), hasProcessingFiles(files)
 ```
 
 ---
@@ -332,6 +369,7 @@ States:
 class SessionModel {
   final String id;
   final String title;
+  final KnowledgeScope knowledgeScope;  // 0/1/2
   final DateTime createdAt;
   final DateTime updatedAt;
 }
@@ -357,123 +395,47 @@ class DocumentModel {
   final int sizeBytes;
   final int chunkCount;
   final String mimeType;
+  final IndexStatus status;       // pending/processing/completed/failed
+  final double progress;          // 0.0→1.0
+  final String? errorMessage;
+  final int retryCount;
+  final String? sessionId;        // null = Global KB
   final DateTime createdAt;
-}
-```
-
-### ChunkModel
-```dart
-class ChunkModel {
-  final String id;
-  final String documentId;
-  final String chunkText;
-  final int chunkIndex;
-  final int tokenCount;
+  final DateTime? lastProcessedAt;
 }
 ```
 
 ---
 
-## ModelManagerService (background_downloader)
+## ModelManagerService
 
 ```dart
-// pubspec.yaml
-// background_downloader: ^9.4.0
-
-/// ModelInfo: data class chứa trạng thái của 1 model file.
-/// Dùng cho cả Gemma, Gecko model và Gecko tokenizer.
 class ModelInfo {
-  final String name;              // tên hiển thị
-  final String fileName;          // tên file trên disk
-  final String downloadUrl;       // URL download
-  final int fileSizeBytes;        // kích thước mong đợi
+  final String name;
+  final String fileName;
+  final String downloadUrl;
+  final int fileSizeBytes;
   final String? checksumSha256;
   final ModelStatus status;       // notDownloaded | downloading | downloaded | error
-  final double progress;          // 0.0 - 1.0
+  final double progress;          // 0.0→1.0
   final String? errorMessage;
 }
 
 abstract interface class ModelManagerService {
-  /// Lấy thông tin model Gemma
   ModelInfo get gemmaInfo;
-
-  /// Lấy thông tin model Gecko
   ModelInfo get geckoInfo;
-
-  /// Stream cập nhật progress download (broadcast, replay state cuối khi subscribe)
   Stream<ModelInfo> get progressStream;
-
-  /// Khởi tạo FileDownloader, config notification, kiểm tra file có sẵn
   Future<void> initialize();
-
-  /// Bắt đầu download Gemma model (no-op nếu đang chạy)
   Future<void> downloadGemma();
-
-  /// Bắt đầu download Gecko model (no-op nếu đang chạy)
   Future<void> downloadGecko();
-
-  /// Bắt đầu download tokenizer SentencePiece cho Gecko
   Future<void> downloadGeckoTokenizer();
-
-  /// Huỷ download của đúng file được chỉ định
   Future<void> cancelDownload(String fileName);
-
-  /// Kiểm tra file đã tồn tại và kích thước hợp lệ không
   Future<bool> isModelFileValid(String fileName);
-
-  /// Đường dẫn đầy đủ tới model file trên disk
   Future<String> getModelPath(String fileName);
-
-  /// Giải phóng resource
   void dispose();
 }
 ```
 
-### Implementation (ModelManagerServiceImpl)
-
-Triển khai trong `lib/services/model_manager/model_manager_service.dart`. Dùng `background_downloader` (FileDownloader) để download:
-- **allowPause: true** — giải quyết Android 9-min WorkManager limit
-- **Broadcast StreamController** — cho phép nhiều listener subscribe
-- **Cache state cuối** — replay cho subscriber mới (tương tự BehaviorSubject)
-- **taskId = fileName** — để background_downloader nhận diện và resume đúng task
-- **Tolerance 5MB** — khi verify file size sau download
-- **downloadGeckoTokenizer()** — download SentencePiece model (~4MB) cho Gecko
-
-Xem code thực tế tại `lib/services/model_manager/model_manager_service.dart`.
-
-### pubspec.yaml cần thêm
-
-```yaml
-dependencies:
-  background_downloader: ^9.4.0
-```
-
-### Android setup
-
-**Kotlin version** — bắt buộc Kotlin 2.1.0+ (android/settings.gradle):
-```groovy
-plugins {
-    id "org.jetbrains.kotlin.android" version "2.1.0" apply false
-}
-```
-
-**AndroidManifest.xml** — chỉ cần notification permission:
-```xml
-<!-- Chỉ cần POST_NOTIFICATIONS để hiện notification trên Android 13+ -->
-<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-<!-- KHÔNG cần FOREGROUND_SERVICE nếu dùng allowPause: true thay vì runInForeground -->
-```
-
-### iOS setup
-
-Trong XCode → Runner target → Signing & Capabilities → thêm **Background Modes** → tick **Background Fetch**.
-
-Hoặc trực tiếp trong `ios/Runner/Info.plist`:
-```xml
-<key>UIBackgroundModes</key>
-<array>
-  <string>fetch</string>
-</array>
-```
-
-> **Lưu ý**: Không cần `flutter_local_notifications`. `background_downloader` tự quản lý notification channel, không conflict với bất kỳ package nào khác.
+Dùng `background_downloader: ^9.4.0`. TaskId = fileName. Tolerance 5MB khi verify size.
+Android: Kotlin 2.1.0+, chỉ cần POST_NOTIFICATIONS.
+iOS: Background Modes → Background Fetch.

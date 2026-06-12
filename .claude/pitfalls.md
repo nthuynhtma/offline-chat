@@ -1,12 +1,60 @@
 # Common Pitfalls & Solutions
 
-## Flutter Gemma
+## Flutter Gemma (Session-Based API)
+
+### Pitfall: GPU crash khi prompt có RAG chunks (MỚI 12/06/2026)
+```
+Lỗi 1: clEnqueueReadBuffer - Execution status error for events in wait list
+Lỗi 2: litert_tensor_buffer.h:748 - tensor allocation error
+Pattern: Chỉ crash khi prompt có RAG chunks embedded (=== Reference Documents ===)
+         Prompt không RAG luôn chạy OK.
+```
+```dart
+// ❌ Chưa rõ nguyên nhân: prompt size >2500 chars hay nội dung RAG formatting
+// Đang điều tra: Test A — prompt ~2500 chars không RAG
+
+// ⚠️ Backend hiện tại: PreferredBackend.gpu
+// Hướng xử lý nếu GPU không ổn định: chuyển sang PreferredBackend.cpu
+```
+
+### Pitfall: hasActiveSession false dù session object vẫn tồn tại
+```dart
+// LiteRT LM constaint: Chỉ support 1 session tại 1 thời điểm.
+// Legacy generate()/generateStream() gọi _model!.createSession()
+// → Session cũ bị invalidate ở FFI, nhưng Dart _session vẫn != null
+
+// ❌ SAI - kiểm tra session nhưng không guard
+await _session!.addQueryChunk(...);  // Bad state: Session is closed
+
+// ✅ ĐÚNG - guard trong ChatBloc trước khi generate
+if (!_gemmaService.hasActiveSession) {
+  log_util.log.i('🔄 [Session] Tạo Gemma session mới...');
+  await _createGemmaSessionWithHistory(_currentMessages);
+}
+```
+
+### Pitfall: Legacy generate() invalidates session chính
+```dart
+// ❌ SAI - SummaryService dùng generateStream(prompt)
+// → FFI session của ChatBloc bị kill
+
+// ✅ ĐÚNG - generate() và generateStream() set _session = null trước createSession()
+final savedSession = _session;
+_session = null;  // ← báo cho ChatBloc rằng session đã chết
+final session = await _model!.createSession();
+try {
+  // use session
+} finally {
+  session.close();
+  if (savedSession != null) _session = null; // không thể restore
+}
+```
 
 ### Pitfall: Model load blocking UI thread
 ```dart
 // ❌ SAI - block UI
 void initState() {
-  gemmaService.initialize(path); // UI freezes
+  gemmaService.initialize(path); // UI freezes 10s+
 }
 
 // ✅ ĐÚNG - dùng Bloc
@@ -18,7 +66,6 @@ add(ModelInitializationRequested(path));
 ```dart
 // ❌ SAI - memory leak
 final session = await model.createSession();
-final stream = session.getResponseAsync();  // no arguments in v0.16.x
 // Quên close()
 
 // ✅ ĐÚNG
@@ -35,11 +82,91 @@ try {
 // ❌ SAI - ChatGPT format
 {"role": "user", "content": "..."}
 
-// ✅ ĐÚNG - Gemma format
-<start_of_turn>user
-...
+// ✅ ĐÚNG - Gemma instruct format
+<start_of_turn>system
+You are AgriAI, an agricultural assistant...
 <end_of_turn>
+
+=== Recent Conversation ===
+<start_of_turn>user
+...<end_of_turn>
+<start_of_turn>assistant
+...<end_of_turn>
+
+=== Reference Documents ===
+[Document 1]
+text...
+
+=== Current Question ===
+<start_of_turn>user
+...<end_of_turn>
 <start_of_turn>model
+```
+
+### Pitfall: PromptBuilder history bị trùng lặp
+```dart
+// ❌ SAI (đã fix 12/06/2026) - history trùng lặp assistant intro
+// Lịch sử: query → intro assistant → query → intro assistant
+
+// ✅ ĐÚNG (VERSION=dedup_v1) - budget-based truncation
+// kMaxHistoryTokens = 300
+// Duyệt từ cuối lên đầu, gom messages trong budget
+// KHÔNG còn exact-match dedup
+```
+
+---
+
+## RAG Pipeline
+
+### Pitfall: matched > 0 nhưng returned = 0 (đã fix 12/06/2026)
+```dart
+// ❌ SAI - dùng break khi chunk vượt budget
+if (chunkToken > effectiveCap) break;  // ← dừng hẳn, bỏ qua chunk ngon phía sau
+
+// ✅ ĐÚNG - try-fit packing (greedy knapsack)
+for (final chunk in results) {
+  if (chunkCount >= kMaxRagChunks) break;
+  if (chunkToken > effectiveCap) continue;  // ← bỏ qua chunk quá lớn, thử chunk tiếp
+  if (tokenSum + chunkToken <= effectiveCap) {
+    trimmed.add(chunk);
+    tokenSum += chunkToken;
+    chunkCount++;
+    if (tokenSum >= effectiveCap) break;  // safety guard
+  }
+}
+```
+
+### Pitfall: Chunk quá lớn so với budget (đã fix 12/06/2026)
+```
+Trước: chunkSize=500 → chunk thực tế 782 tokens (do charsPerToken mismatch)
+Sau:  chunkSize=250 → chunk thực tế ~380 tokens
+Cần:  chunkSize=200 → chunk thực tế ~300 tokens (có thể pack 2 chunks)
+```
+
+### Pitfall: Quên hard cap kMaxRagTokens
+```dart
+// ❌ SAI - tokenBudget từ Context Budget có thể rất lớn (~1300)
+final effectiveCap = tokenBudget;  // → 1300 tokens cho RAG, chiếm hết context
+
+// ✅ ĐÚNG - hard cap với kMaxRagTokens
+final effectiveCap = tokenBudget < kMaxRagTokens ? tokenBudget : kMaxRagTokens;
+// kMaxRagTokens = 500
+```
+
+### Pitfall: Short query không nên chạy RAG (đã fix 12/06/2026)
+```dart
+// ❌ SAI - "chào", "bạn là ai" vẫn chạy RAG
+
+// ✅ ĐÚNG - shouldSkipRag() guard
+RagSkipReason? _shouldSkipRag(String query) {
+  // tooShort: ≤2 từ, không ?, <15 ký tự
+  if (q.split(' ').length <= 2 && !q.contains('?') && q.length < 15) return RagSkipReason.tooShort;
+  // greeting: hi/hello/chào/xin chào
+  if (RegExp(r'^(hi|hello|hey|chào|xin chào)(\s|$)').hasMatch(q)) return RagSkipReason.greeting;
+  // capability: bạn là ai/giúp gì
+  if (q.contains('bạn là ai') || q.contains('giúp gì')) return RagSkipReason.capability;
+  return null;
+}
 ```
 
 ---
@@ -52,15 +179,6 @@ try {
 dart run build_runner build --delete-conflicting-outputs
 ```
 
-### Pitfall: Truy cập DB trên main isolate với data lớn
-```dart
-// ❌ SAI - load toàn bộ 50k vectors trên main thread
-final vectors = await vectorsDao.getAllVectors();
-
-// ✅ ĐÚNG - dùng NativeDatabase.createInBackground()
-// Đã config trong app_database.dart, tự động xử lý
-```
-
 ### Pitfall: Cascade delete không hoạt động
 ```dart
 // Phải khai báo trong foreign key
@@ -70,15 +188,27 @@ TextColumn get documentId => text().references(
 )();
 ```
 
+### Pitfall: ChunksCompanion thiếu createdAt
+```dart
+// ❌ SAI - Drift throw InvalidDataException
+ChunksCompanion(
+  id: Value(uuid.v4()),
+  // thiếu createdAt
+)
+
+// ✅ ĐÚNG
+ChunksCompanion(
+  id: Value(uuid.v4()),
+  createdAt: Value(DateTime.now()),  // ← BẮT BUỘC
+)
+```
+
 ---
 
 ## Vector Store / Embedding
 
 ### Pitfall: Float precision khi serialize/deserialize
 ```dart
-// ❌ SAI - dùng List<double> serialize thủ công
-final bytes = embedding.map((v) => v.toInt()).toList(); // MẤT precision!
-
 // ✅ ĐÚNG - dùng Float32List
 final float32 = Float32List.fromList(embedding);
 final bytes = float32.buffer.asUint8List(); // giữ nguyên precision
@@ -95,49 +225,77 @@ if (normA == 0 || normB == 0) return 0.0;
 // Gecko output CÓ THỂ đã normalized, kiểm tra bằng:
 double norm = sqrt(embedding.map((v) => v * v).reduce((a, b) => a + b));
 // Nếu norm ≈ 1.0 thì đã normalized
-// Nếu không, cần normalize trước khi store
 ```
 
 ---
 
 ## Embedding / Gecko
 
-### Pitfall: Dùng tflite_flutter Interpreter sai format
+### Pitfall: Dùng tflite_flutter Interpreter sai (đã migrate)
 ```dart
-// ❌ SAI - interpreter.run() với List<List<String>> không phải tensor hợp lệ
-final input = texts.map((t) => [t]).toList();
-final output = List.generate(texts.length, (_) => List<double>.filled(768, 0.0));
-interpreter.run(input, output); // → Bad state: failed precondition
+// ❌ SAI - dùng tflite_flutter với Gecko
+final interpreter = await Interpreter.fromFile(modelFile);
+interpreter.run(input, output); // → sai format tensor
 
 // ✅ ĐÚNG - dùng flutter_gemma EmbeddingModel API
-// flutter_gemma tự xử lý tokenizer (SentencePiece) + correct tensor shapes
-final model = await FlutterGemma.getActiveEmbedder();
-final vectors = await model.generateEmbeddings(texts, taskType: TaskType.retrievalDocument);
+await geckoService.registerModel(
+  modelPath: '/path/to/Gecko_256_quant.tflite',
+  tokenizerPath: '/path/to/sentencepiece.model',
+);
+await geckoService.initialize();
+final vector = await geckoService.embed(text);
+```
+
+### Pitfall: Gecko FIFO lock (race condition GPU/FFI)
+```dart
+// ❌ SAI - gọi embed() song song
+await Future.wait([geckoService.embed(a), geckoService.embed(b)]); // GPU crash
+
+// ✅ ĐÚNG - GeckoServiceImpl._runLocked<T>(fn)
+// FIFO: chờ previous lock → set lock mới → fn() → release
 ```
 
 ### Pitfall: Quên registerModel trước khi initialize
 ```dart
-// ❌ SAI - FlutterGemma.getActiveEmbedder() sẽ throw StateError
-// nếu chưa có active embedding model
+// ❌ SAI - FlutterGemma.getActiveEmbedder() throw StateError
 await geckoService.initialize();
 
-// ✅ ĐÚNG - gọi registerModel trước
-await geckoService.registerModel(
-  modelPath: '/path/to/model.tflite',
-  tokenizerPath: '/path/to/sentencepiece.model',
-);
+// ✅ ĐÚNG
+await geckoService.registerModel(modelPath: ..., tokenizerPath: ...);
 await geckoService.initialize();
 ```
 
 ### Pitfall: Thiếu tokenizer file
 ```dart
 // Gecko model cần tokenizer SentencePiece (~4MB) đi kèm
-// flutter_gemma yêu cầu cả model + tokenizer để install embedder
-// Nếu thiếu tokenizer → FlutterGemma.installEmbedder() sẽ fail
-
-// ✅ Giải pháp: download cả 2 files trước khi register
+// Download cả 2 files:
 await modelManager.downloadGecko();          // .tflite file
 await modelManager.downloadGeckoTokenizer(); // .model file (SentencePiece)
+```
+
+---
+
+## Context Budget / Token Estimator
+
+### Pitfall: CharsPerToken mismatch giữa chunker và estimator
+```
+Chunker:  charsPerToken = 4   → chunkSize=500 → 2000 chars
+Estimator: kCharsPerToken = 2.5 → 2000 chars / 2.5 = 800 tokens (thực tế gấp 1.6x)
+Kết quả: Chunk vượt kMaxRagTokens (500) bị continue
+```
+
+### Pitfall: Hardcode totalBudget=8000 không còn dùng
+```dart
+// ❌ SAI - constants cũ (đã xóa khỏi app_constants.dart)
+const int totalBudget = 8000;
+const int ragBudget = 4000;
+
+// ✅ ĐÚNG - ratio-based dynamic
+kGemmaMaxTokens = 2048
+historyBudgetRatio = 0.35 (≈717)
+responseBudgetRatio = 0.25 (≈512)
+systemBudgetRatio = 0.10 (≈205)
+ragBudget = max(0, 2048 - history - response - system - question)
 ```
 
 ---
@@ -160,73 +318,34 @@ await emit.forEach(
 
 ### Pitfall: State không rebuild vì equality
 ```dart
-// ❌ SAI - Dart dùng reference equality
-class ChatLoaded extends ChatState {
+// ✅ ĐÚNG - extend Equatable hoặc override props
+class ChatStreaming extends ChatState {
   final List<MessageModel> messages;
-  // Không override ==, 2 ChatLoaded với cùng messages vẫn khác nhau
-}
-
-// ✅ ĐÚNG - implement Equatable
-class ChatLoaded extends ChatState with EquatableMixin {
-  final List<MessageModel> messages;
+  final String streamingText;
   @override
-  List<Object?> get props => [messages];
+  List<Object?> get props => [messages, streamingText];
 }
 ```
 
-### Pitfall: GetIt Singleton + BlocProvider → Bad state (quan trọng!)
+### Pitfall: GetIt Singleton + BlocProvider → Bad state
 ```dart
 // Root cause: GetIt giữ singleton, BlocProvider dispose bloc khi page pop.
-// Lần sau context.read<Bloc>() dùng instance đã dispose → StateError (Bad state)
 
-// ❌ SAI: mỗi page tự tạo BlocProvider với GetIt singleton
-class ModelManagerPage extends StatelessWidget {
-  Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (_) => sl<ModelBloc>()..add(const StatusChecked()),  // ← GetIt singleton
-      child: _View(),
-    );
-  }
-}
-// → Khi page pop, BlocProvider dispose ModelBloc.
-// → GetIt vẫn giữ reference đến instance đã dispose.
-// → Lần sau vào trang lại, sl<ModelBloc>() trả về instance đã chết → Bad state
+// ❌ SAI: mỗi page tạo BlocProvider với GetIt singleton
+// → Page pop → BlocProvider dispose → GetIt reference đã chết
 
 // ✅ ĐÚNG: Gom singleton bloc vào MultiBlocProvider ở app.dart
-// Các page chỉ context.read<T>() mà không tạo BlocProvider
-// app.dart:
-@override
-Widget build(BuildContext context) {
-  return MultiBlocProvider(
-    providers: [
-      BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
-      BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
-      BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
-    ],
-    child: MaterialApp.router(...),
-  );
-}
+// BlocProvider<ModelBloc>(create: (_) => sl<ModelBloc>()..add(const StatusChecked())),
+// BlocProvider<SessionBloc>(create: (_) => sl<SessionBloc>()..add(const SessionsLoaded())),
+// BlocProvider<KnowledgeBloc>(create: (_) => sl<KnowledgeBloc>()..add(const DocumentsLoaded())),
+// BlocProvider<SessionFilesCubit>(create: (_) => sl<SessionFilesCubit>()),
 
-// Các page chỉ cần:
-class ModelManagerPage extends StatelessWidget {
-  const ModelManagerPage({super.key});
-  Widget build(BuildContext context) {
-    return const _ModelManagerView(); // context.watch<ModelBloc>() tự tìm lên trên
-  }
-}
-
-// Ngoại lệ: ChatBloc (factory pattern) — mỗi session 1 instance riêng
-// Giữ BlocProvider ở ChatPage với key để Flutter tự dispose
-class ChatPage extends StatelessWidget {
-  final String sessionId;
-  Widget build(BuildContext context) {
-    return BlocProvider(
-      key: ValueKey('chat_$sessionId'),  // ← quan trọng: mới khi session đổi
-      create: (_) => sl<ChatBloc>()..add(SessionInitialized(sessionId)),
-      child: ChatView(sessionId: sessionId),
-    );
-  }
-}
+// Ngoại lệ: ChatBloc (factory) — giữ BlocProvider ở ChatPage với key
+BlocProvider(
+  key: ValueKey('chat_$sessionId'),
+  create: (_) => sl<ChatBloc>()..add(SessionInitialized(sessionId)),
+  child: const ChatView(),
+);
 ```
 
 ---
@@ -237,19 +356,17 @@ class ChatPage extends StatelessWidget {
 ```xml
 <!-- ios/Runner/Info.plist -->
 <key>NSDocumentPickerUsageDescription</key>
-<string>Cần truy cập để import tài liệu vào knowledge base</string>
+<string>Cần truy cập để import tài liệu</string>
 <key>UIFileSharingEnabled</key>
 <true/>
 ```
 
 ### Android: Large model files
 ```groovy
-// android/app/build.gradle
 android {
   defaultConfig {
     minSdkVersion 24
   }
-  // Nếu bundle model trong assets (không khuyến nghị vì quá lớn)
   aaptOptions {
     noCompress "litertlm", "tflite"
   }
@@ -258,9 +375,9 @@ android {
 
 ### Lưu model ngoài assets (KHUYẾN NGHỊ)
 ```dart
-// Model nên download runtime, không bundle trong app
+// Model download runtime, không bundle
 // Lưu vào: getApplicationDocumentsDirectory()
-// Lý do: APK/IPA sẽ quá lớn (~3GB) nếu bundle model
+// Lý do: APK/IPA sẽ quá lớn (~3GB)
 ```
 
 ---
@@ -271,99 +388,66 @@ android {
 ```dart
 // ❌ CHẬM - O(n) round trips
 for (final chunk in chunks) {
-  final vector = await geckoService.embed(chunk); // mỗi lần 1 round trip
+  final vector = await geckoService.embed(chunk);
 }
 
 // ✅ NHANH HƠN - batch embed
 final vectors = await geckoService.embedBatch(chunks); // 1 round trip
 ```
 
-### Pitfall: Rebuild toàn bộ MessageList khi stream
+### Pitfall: Rebuild toàn bộ MessageList khi stream (đã fix 11/06/2026)
 ```dart
-// ❌ SAI - rebuild toàn bộ list mỗi token
-BlocBuilder<ChatBloc, ChatState>(
-  builder: (_, state) => ListView.builder(
-    itemCount: state.messages.length,
-    itemBuilder: (_, i) => MessageBubble(state.messages[i]),
-  ),
-);
-
-// ✅ ĐÚNG - chỉ rebuild bubble đang stream
-// Dùng buildWhen hoặc tách StreamingMessageBubble ra ngoài ListView
+// ✅ ĐÚNG - tách LastBubble riêng với buildWhen
+// LastBubble chỉ rebuild khi streamingText thay đổi
+// ChatBody dùng buildWhen trừ ChatThinking→ChatThinking
+// Tổng cộng 11 widget con, giảm 85% code chat_page.dart
 ```
 
-### Memory: Unload model khi app background (optional)
-```dart
-// Trong AppLifecycleObserver:
-if (state == AppLifecycleState.paused) {
-  // Consider unloading model nếu cần RAM
-}
+### Pitfall: GPU allocation error với prompt dài
+```
+LiteRT LM trên GPU backend có thể crash khi:
+- Prompt > 2500 chars + RAG chunks (đang điều tra)
+- Session bị reuse qua nhiều turn
+
+Giải pháp tạm thời: closeSession() + createSession() mỗi turn
+Giải pháp lâu dài: PreferredBackend.cpu nếu GPU không ổn định
 ```
 
 ---
 
 ## background_downloader - Large Model Files
 
-### Pitfall: Dùng WorkManager mặc định cho file >2GB
+### Pitfall: WorkManager bị kill cho file >2GB
 ```dart
-// ❌ SAI - WorkManager bị kill sau 9 phút trên Android
-// File 2.8GB ở 5Mbps = ~75 phút → sẽ bị terminate
+// File 2.8GB Gemma ở 5Mbps = ~75 phút → bị terminate
 
-// ✅ ĐÚNG - Config Foreground Service TRƯỚC khi download
-await FileDownloader().configure(
-  globalConfig: [(Config.runInForeground, Config.always)],
-);
-```
-
-### Pitfall: Không set allowPause = true → mất resume + bị kill sau 9 phút
-```dart
-// ❌ SAI - trên Android, WorkManager kill task sau 9 phút
-// File 2.8GB ở 5Mbps = ~75 phút → bị terminate, mất toàn bộ progress
-final task = DownloadTask(url: url, filename: filename);
-
-// ✅ ĐÚNG - allowPause: true là giải pháp chính thức
-// Khi 9-min limit gần đến, task tự pause và tự resume → eventually complete
+// ✅ ĐÚNG - allowPause: true
 final task = DownloadTask(
   url: url,
   filename: filename,
-  allowPause: true,   // ← giải quyết Android 9-min WorkManager limit
+  allowPause: true,   // ← tự pause khi sắp hết thời gian
   retries: 3,
 );
 
-// Android 14+ thêm option: priority 0 → User Initiated Data Transfer
-// không bị 9-min limit, không cần pause/resume cycle
-// final task = DownloadTask(..., priority: 0);
+// Android 14+: priority: 0 → User Initiated Data Transfer
 ```
 
-### Pitfall: Không request notification permission trên Android 13+
+### Pitfall: Không request notification permission Android 13+
 ```dart
-// ✅ Request permission khi bắt đầu download
-final status = await Permission.notification.request();
-if (status.isDenied) {
-  // User sẽ không thấy download progress khi app background
-  // Vẫn chạy được nhưng UX kém
-}
+await Permission.notification.request();
 ```
 
 ### Pitfall: Lưu file vào sai directory
 ```dart
-// ❌ SAI - external storage có thể không accessible
-BaseDirectory.temporary  // bị xóa bởi OS
-
-// ✅ ĐÚNG - application documents directory, persistent
-BaseDirectory.applicationDocuments
-// Path thực: getApplicationDocumentsDirectory()/models/
+// ✅ ĐÚNG - BaseDirectory.applicationDocuments
+// Path: getApplicationDocumentsDirectory()/models/
 ```
 
 ### Pitfall: Thêm flutter_local_notifications cùng background_downloader
 ```
-// ❌ KHÔNG CẦN - background_downloader có built-in notification
-// Thêm flutter_local_notifications sẽ conflict notification channel
-
-// ✅ ĐÚNG - dùng configureNotification() của background_downloader
+// ✅ ĐÚNG - dùng configureNotification() built-in
 FileDownloader().configureNotification(
   running: const TaskNotification('Đang tải', '{progress}%'),
   complete: const TaskNotification('Hoàn thành', 'Model sẵn sàng'),
 );
-// Không cần thêm bất kỳ package notification nào khác
-```
+// KHÔNG cần thêm package notification khác
