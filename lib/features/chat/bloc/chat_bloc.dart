@@ -26,8 +26,7 @@ import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 /// Extension property để ChatState có thể get knowledgeScope
 extension ChatStateScopeX on ChatState {
   KnowledgeScope get knowledgeScope =>
-      this is ChatScopeProvider ? (this as ChatScopeProvider).knowledgeScope
-      : KnowledgeScope.attachedAndGlobal;
+      this is ChatScopeProvider ? (this as ChatScopeProvider).knowledgeScope : KnowledgeScope.attachedAndGlobal;
 }
 
 abstract class ChatScopeProvider {
@@ -273,7 +272,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
             msg.content,
           );
         }
-        log_util.log.i('🔄 [Session] Replayed ${recentMessages.length} recent messages (~${recentTokenSum}tok budget=${recentBudget}tok)');
+        log_util.log.i(
+            '🔄 [Session] Replayed ${recentMessages.length} recent messages (~${recentTokenSum}tok budget=${recentBudget}tok)');
       } else {
         // Không có summary → replay history bình thường (token-budget)
         await _createGemmaSessionWithHistory(messages);
@@ -306,8 +306,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       final modelState = _modelBloc.state;
 
       if (modelState is ModelLoaded) {
-        final isDownloaded =
-            modelState.gemmaInfo.status == ModelStatus.downloaded;
+        final isDownloaded = modelState.gemmaInfo.status == ModelStatus.downloaded;
 
         if (isDownloaded && !modelState.gemmaReady) {
           _pendingMessage = event.content;
@@ -315,9 +314,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
           _modelSubscription?.cancel();
           _modelSubscription = _modelBloc.stream.listen((newState) {
-            if (newState is ModelLoaded &&
-                newState.gemmaReady &&
-                _pendingMessage != null) {
+            if (newState is ModelLoaded && newState.gemmaReady && _pendingMessage != null) {
               final pending = _pendingMessage;
               _pendingMessage = null;
               _isWaitingForModel = false;
@@ -328,8 +325,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
           });
 
           final currentModelState = _modelBloc.state;
-          if (currentModelState is ModelLoaded &&
-              currentModelState.gemmaReady) {
+          if (currentModelState is ModelLoaded && currentModelState.gemmaReady) {
             _isWaitingForModel = false;
             _pendingMessage = null;
             _modelSubscription?.cancel();
@@ -358,7 +354,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     // Reset tracking
     _accumulatedText = '';
 
-    log_util.log.i('📤 [SendMessage] session=$_currentSessionId content="${event.content.length > 100 ? '${event.content.substring(0, 100)}...' : event.content}" (length=${event.content.length})');
+    log_util.log.i(
+        '📤 [SendMessage] session=$_currentSessionId content="${event.content.length > 100 ? '${event.content.substring(0, 100)}...' : event.content}" (length=${event.content.length})');
 
     try {
       // 1. Save user message
@@ -390,11 +387,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         historyTokenSum += msgToken;
       }
 
-      final ragBudget = kGemmaMaxTokens -
-          historyTokenSum -
-          reservedResponse -
-          reservedSystem -
-          questionTokens;
+      final ragBudget = kGemmaMaxTokens - historyTokenSum - reservedResponse - reservedSystem - questionTokens;
 
       log_util.log.i(
         '📊 Context Budget: '
@@ -419,10 +412,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
       // 3. Build prompt via PromptBuilder
       final userMemories = await _memoryStore.getAllUserMemories();
-      final userMemoryList = userMemories
-          .map((m) => UserMemory(
-              namespace: m.namespace, key: m.key, value: m.value))
-          .toList();
+      final userMemoryList =
+          userMemories.map((m) => UserMemory(namespace: m.namespace, key: m.key, value: m.value)).toList();
 
       final memoryRow = await _memoryStore.getSessionMemory(_currentSessionId!);
 
@@ -472,8 +463,7 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
       // 6. Save complete assistant message
       if (_accumulatedText.isNotEmpty && state is! ChatError) {
-        log_util.log.i('💾 [SendMessage] Lưu assistant response (${_accumulatedText.length} chars)');
-
+        log_util.log.i('💾 [SendMessage] Assistant response:\n$_accumulatedText');
         final assistantMsg = await _messageRepo.saveMessage(
           sessionId: _currentSessionId!,
           role: MessageRole.assistant,
@@ -484,8 +474,8 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
         final finalMessages = <MessageModel>[...currentMessages, assistantMsg];
         _currentMessages = finalMessages;
-        log_util.log.i('✅ [SendMessage] Hoàn tất: ${finalMessages.length} messages, response=${_accumulatedText.length} chars');
-
+        log_util.log.i('✅ [SendMessage] Hoàn tất: ${finalMessages.length} messages'
+            '\nAssistant response:\n$_accumulatedText');
         // ─── Auto-summary trigger ──────────────────────────────────
         _tryTriggerAutoSummary();
 
@@ -665,7 +655,8 @@ Instructions:
         msg.content,
       );
     }
-    log_util.log.i('🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
+    log_util.log.i(
+        '🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
   }
 
   // ─── Auto Summary ────────────────────────────────────────────────────
@@ -688,7 +679,8 @@ Instructions:
       return;
     }
 
-    log_util.log.i('📝 [AutoSummary] Triggered: runningTokens=$newRunningCount > trigger=${_memoryBudget.summaryTrigger}');
+    log_util.log
+        .i('📝 [AutoSummary] Triggered: runningTokens=$newRunningCount > trigger=${_memoryBudget.summaryTrigger}');
     unawaited(_runAutoSummary());
   }
 

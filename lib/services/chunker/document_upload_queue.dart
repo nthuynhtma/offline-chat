@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import 'package:offline_chat/core/constants/document_constants.dart';
 import 'package:offline_chat/core/errors/app_exception.dart';
 import 'package:offline_chat/core/utils/logger.dart' as logger;
+import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
@@ -175,10 +176,31 @@ class DocumentUploadQueue {
 
       // ─── Step 2: Chunk (0.10 → 0.20) ──────────────────────────────────
       await _setProgress(job.documentId, 0.15);
-      final chunks = _chunker.chunk(rawText);
+      const int chunkSize = 250;
+      const int chunkOverlap = 50;
+      final chunks = _chunker.chunk(
+        rawText,
+        chunkSize: chunkSize,
+        overlap: chunkOverlap,
+      );
       if (chunks.isEmpty) {
         throw const DocumentParseException('No chunks generated');
       }
+
+      // Log chunk detail
+      logger.log.i('[UploadQueue] Chunks: ${chunks.length} chunks (chunkSize=$chunkSize, overlap=$chunkOverlap)');
+      for (var i = 0; i < chunks.length; i++) {
+        final estimatedTokens = estimateTokens(chunks[i]);
+        final previewLen = min(60, chunks[i].length);
+        final preview = previewLen > 0 ? chunks[i].substring(0, previewLen) : '';
+        logger.log.d(
+          '[UploadQueue] chunk[$i] '
+          'chars=${chunks[i].length} '
+          'tokens=$estimatedTokens '
+          'preview="$preview..."',
+        );
+      }
+
       await _setProgress(job.documentId, 0.20);
 
       // ─── Step 3: Embed từng chunk (0.20 → 0.95) ───────────────────────

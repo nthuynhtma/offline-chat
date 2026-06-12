@@ -50,6 +50,12 @@ const int kSummaryBudgetMax = 500;
 /// Duration timeout cho summarize generation
 const int kSummaryTimeoutSeconds = 30;
 
+/// Hard cap số chunks tối đa trả về từ RAG (safety net)
+const int kMaxRagChunks = 3;
+
+/// Hard cap RAG tokens — safety net, bất kể tokenBudget từ allocator
+const int kMaxRagTokens = 500;
+
 /// === Retrieval Telemetry constants ===
 
 /// Số lượng top scores tối đa trong telemetry (tránh log quá nhiều nếu topK lớn)

@@ -1,3 +1,4 @@
+import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/features/chat/models/message_model.dart';
 import 'package:offline_chat/services/rag/rag_context.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
@@ -35,6 +36,9 @@ class UserMemory {
   });
 }
 
+/// Max tokens dành cho history trong prompt.
+const int kMaxHistoryTokens = 300;
+
 final class PromptBuilderImpl implements PromptBuilder {
   @override
   Future<String> build({
@@ -44,7 +48,7 @@ final class PromptBuilderImpl implements PromptBuilder {
     String? sessionSummary,
     List<UserMemory>? userMemories,
   }) async {
-    log_util.log.d('🔨 [PromptBuilder] Bắt đầu build prompt...');
+    log_util.log.d('🔨 [PromptBuilder] VERSION=dedup_v1 Bắt đầu build prompt...');
 
     final buffer = StringBuffer();
 
@@ -96,22 +100,41 @@ final class PromptBuilderImpl implements PromptBuilder {
     // ─── 4. Recent Conversation (ngữ cảnh gần) ──────────────────────
     // Bỏ qua message cuối cùng trong history nếu nó trùng với question
     // (vì message này sẽ được thêm riêng ở bước "Current question" bên dưới)
-    final historyToInclude = (history.isNotEmpty &&
+    var historyToInclude = (history.isNotEmpty &&
             history.last.role.name == 'user' &&
             history.last.content == question)
         ? history.sublist(0, history.length - 1)
         : history;
 
+    // Budget-based history truncation: lấy từ cuối lên đến khi hết budget
+    if (historyToInclude.isNotEmpty) {
+      // Duyệt từ cuối lên đầu, gom messages trong budget
+      final selected = <MessageModel>[];
+      var tokenBudget = kMaxHistoryTokens;
+
+      for (var i = historyToInclude.length - 1; i >= 0; i--) {
+        final msg = historyToInclude[i];
+        final msgTokens =
+            estimateTokens(msg.content) + estimateTokens('<start_of_turn>role<end_of_turn>\n');
+        if (tokenBudget - msgTokens < 0) break;
+        tokenBudget -= msgTokens;
+        selected.add(msg);
+      }
+
+      // selected đang từ cuối lên, reverse lại
+      historyToInclude = selected.reversed.toList();
+    }
+
     if (historyToInclude.isNotEmpty) {
       buffer.writeln('=== Recent Conversation ===');
-      log_util.log.d('🔨 [PromptBuilder] Thêm ${historyToInclude.length} history turns (bỏ qua ${history.length - historyToInclude.length} message cuối trùng với question)');
+      log_util.log.d('🔨 [PromptBuilder] VERSION=dedup_v1 Thêm ${historyToInclude.length} history turns (${kMaxHistoryTokens} token budget)');
       for (final msg in historyToInclude) {
         buffer.writeln('<start_of_turn>${msg.role.name}');
         buffer.writeln(msg.content);
         buffer.writeln('<end_of_turn>');
       }
     } else {
-      log_util.log.d('🔨 [PromptBuilder] Không có history turns');
+      log_util.log.d('🔨 [PromptBuilder] VERSION=dedup_v1 Không có history turns');
     }
 
     // ─── 5. RAG Context (sát question nhất — Gemma tập trung tốt hơn) ──

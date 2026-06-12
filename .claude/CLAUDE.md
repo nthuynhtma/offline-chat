@@ -216,10 +216,16 @@ Import file → Knowledge Page
 FIFO _processNext() (Future chain, không lock phức tạp)
   └→ _processJob():
        Parse    0.00 → 0.10
-       Chunk    0.10 → 0.20
+       Chunk    0.10 → 0.20  (chunkSize=250, overlap=50)
        Embed    0.20 → 0.95  (per chunk, progressive %)
        Insert   0.95 → 1.00  (chunks + vectors)
        Complete 1.00          (status=completed)
+
+Chunk logging detail (thêm 12/06/2026):
+  [UploadQueue] Chunks: 3 chunks (chunkSize=250, overlap=50)
+  [UploadQueue] chunk[0] chars=... tokens=... preview="..."
+  Dùng estimateTokens() cho token count (cùng estimator với RAG/PromptBuilder)
+  Safe substring (min 60, never crash)
 
 Granular progress (hiển thị realtime trên SessionFilesPanel + _AttachedFilesBar):
   contract.pdf  [████████░░] 82%
@@ -257,7 +263,7 @@ Gecko Embedding Lock (tránh race condition GPU/FFI):
 
   Hiệu quả: FIFO trên embed/embedBatch, không cần thêm dependencies.
 
-Chunks + Vectors:
+Chunks + Vectors (runtime default: chunkSize=250, overlap=50; app_constants defaultChunkSize cũ=500 không dùng):
   - Tạo ChunksCompanion (uuid.v4 id, documentId, chunkIndex, chunkText, tokenCount)
   - insertChunks batch → getChunksByDocument (Drift auto-generate)
   - VectorEntry(chunkId, embedding) → insertBatch
@@ -437,7 +443,7 @@ Key files:
 ContextManagerService: @Deprecated — giữ lại để tránh break build, sẽ cleanup sau.
 ```
 
-### RagService — RAG Pipeline Interface
+### RagService — RAG Pipeline Interface (VERSION=try_fit_v2)
 ```
 abstract interface class RagService {
   Future<RagContext> retrieve({
@@ -449,12 +455,16 @@ abstract interface class RagService {
 }
 
 RagContext:
-  - chunks: List<SearchResult> (đã trim chunk-level, removeLast())
+  - chunks: List<SearchResult> (try-fit packed)
   - tokenCount: int (tổng token của chunks)
   - bestScore: double? (top-1 score, null nếu không có chunks)
   - hasContext: bool (getter: chunks.isNotEmpty)
 
 RagServiceImpl pipeline:
+  0. Early exit guard: _shouldSkipRag() — kiểm tra no-context queries
+     - RagSkipReason.tooShort (≤2 từ, không ?, <15 ký tự)
+     - RagSkipReason.greeting (pattern hi/hello/chào)
+     - RagSkipReason.capability (bạn là ai/giúp gì)
   1. Embed query → GeckoService
   2. Filter document IDs theo KnowledgeScope (chỉ lấy completed):
      - attachedOnly: getCompletedDocumentIdsBySessionId + getCompletedDocumentIdsByIds(refDocIds)
@@ -462,15 +472,27 @@ RagServiceImpl pipeline:
      - attachedAndGlobal: global completed + session completed + ref completed
   3. Nếu allowedDocIds rỗng → early return RagContext.empty (không embed, không search)
   4. Vector search → VectorStoreService (topK: 20, threshold: 0.7, allowedDocumentIds)
-  5. Chunk-level trim → break khi vượt tokenBudget
-  6. Log RagTelemetry
-  7. Return RagContext
+  5. Log candidates info (top 3 chunks): score, chars, tokens, preview
+  6. Try-fit packing (greedy knapsack):
+     - Hard cap: kMaxRagChunks=3, kMaxRagTokens=500
+     - continue oversized chunks (> effectiveCap)
+     - add nếu còn budget
+     - safety guard khi đầy
+  7. Log packing result: matched, packed, tokens, cap
+  8. Log RagTelemetry
+  9. Return RagContext
 
 VectorStoreService 2-step search:
   - Step 1: Filter candidates bằng allowedDocumentIds (WHERE documentId IN ...)
   - Step 2: Pre-topK (200) → cosine similarity → re-rank → topK (20)
 
 Graceful degradation: nếu Gecko chưa ready hoặc search lỗi → RagContext rỗng
+
+Key files:
+  - lib/services/rag/rag_service_impl.dart — VERSION=try_fit_v2 marker
+  - lib/services/rag/rag_telemetry.dart
+  - lib/services/rag/rag_telemetry_aggregator.dart
+  - lib/core/constants/model_constants.dart → kMaxRagChunks, kMaxRagTokens, kTelemetryTopScoresCount, kWeakScoreThreshold
 ```
 
 ### RagTelemetry + RagTelemetryAggregator — Retrieval Observability
@@ -499,7 +521,7 @@ Key files:
   - lib/core/constants/model_constants.dart → kTelemetryTopScoresCount, kWeakScoreThreshold
 ```
 
-### PromptBuilder — Prompt Pipeline
+### PromptBuilder — Prompt Pipeline (VERSION=dedup_v1)
 ```
 abstract interface class PromptBuilder {
   Future<String> build({
@@ -517,12 +539,18 @@ PromptBuilderImpl ordering (ưu tiên RAG sát question):
     === User Memory ===        (cross-session persona)
     === Session Summary ===     (conversation state)
   <end_of_turn>
-    === Recent Conversation === (history turns)
+    === Recent Conversation === (history turns — budget-based truncation)
     === Reference Documents === (RAG chunks — sát question nhất)
     === Current Question ===
   <start_of_turn>user
     question
   <start_of_turn>model
+
+History truncation — Budget-based (KHÔNG còn exact-match dedup):
+  kMaxHistoryTokens = 300
+  Duyệt từ cuối lên đầu, gom messages trong budget
+  Dùng estimateTokens() + role overhead
+  Selected reversed để giữ thứ tự thời gian
 
 Lưu ý: Delimiter (=== ... ===) giúp Gemma ổn định hơn.
 RAG nằm giữa History và Question để model nhỏ không bị loãng context.

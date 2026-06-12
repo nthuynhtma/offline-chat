@@ -1,7 +1,7 @@
 import 'package:offline_chat/core/constants/document_constants.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/core/utils/token_estimator.dart';
-import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/rag/rag_context.dart';
@@ -9,14 +9,19 @@ import 'package:offline_chat/services/rag/rag_service.dart';
 import 'package:offline_chat/services/rag/rag_telemetry.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
+/// Lý do skip RAG cho no-context query.
+enum RagSkipReason { greeting, tooShort, capability }
+
 /// Implementation của [RagService] sử dụng Gecko embedding + SQLite vector search.
 ///
 /// Pipeline:
 /// 1. Embed query → GeckoService
 /// 2. Vector search → VectorStoreService (topK: 20, threshold: 0.7)
-/// 3. Chunk-level trim → removeLast() cho đến khi vừa tokenBudget
+/// 3. Try-fit packing (greedy knapsack)
 /// 4. Log telemetry
 /// 5. Return RagContext
+/// 
+/// VERSION=try_fit_v2
 class RagServiceImpl implements RagService {
   final AppDatabase _db;
   final GeckoService _geckoService;
@@ -36,6 +41,31 @@ class RagServiceImpl implements RagService {
         _geckoService = geckoService,
         _vectorStore = vectorStore;
 
+  /// Kiểm tra query có phải no-context (greeting, capability, quá ngắn) hay không.
+  /// Trả về [RagSkipReason] nếu skip, null nếu không.
+  RagSkipReason? _shouldSkipRag(String query) {
+    final q = query.trim().toLowerCase();
+
+    // Rule 1: quá ngắn (<= 2 từ, không có dấu ?, và < 15 ký tự)
+    if (q.split(' ').length <= 2 && !q.contains('?') && q.length < 15) {
+      return RagSkipReason.tooShort;
+    }
+
+    // Rule 2: greeting pattern
+    if (RegExp(r'^(hi|hello|hey|chào|xin chào)(\s|$)').hasMatch(q)) {
+      return RagSkipReason.greeting;
+    }
+
+    // Rule 3: capability question
+    if (q.contains('bạn là ai') ||
+        q.contains('giúp gì') ||
+        q.contains('what can you do')) {
+      return RagSkipReason.capability;
+    }
+
+    return null;
+  }
+
   @override
   Future<RagContext> retrieve({
     required String query,
@@ -47,6 +77,13 @@ class RagServiceImpl implements RagService {
 
     if (tokenBudget <= 0) {
       log_util.log.w('⚠️ [RagService] tokenBudget <= 0 ($tokenBudget) — skip retrieval');
+      return RagContext(chunks: [], tokenCount: 0);
+    }
+
+    // 0. Early exit: no-context query → skip RAG
+    final skipReason = _shouldSkipRag(query);
+    if (skipReason != null) {
+      log_util.log.i('[RAG] skip reason=${skipReason.name} query="$query"');
       return RagContext(chunks: [], tokenCount: 0);
     }
 
@@ -130,29 +167,62 @@ class RagServiceImpl implements RagService {
 
     final matchedChunks = results.length;
 
+    // Log candidates info (top 3 chunks): score, chars, estimatedTokens, preview
+    log_util.log.i('[RAG] VERSION=try_fit_v2');
+    for (final c in results.take(3)) {
+      final tokens = estimateTokens(c.chunkText);
+      final preview = c.chunkText.length > 150
+          ? '${c.chunkText.substring(0, 150)}...'
+          : c.chunkText;
+      log_util.log.i(
+        '[RAG] candidate score=${c.score.toStringAsFixed(3)} '
+        'chars=${c.chunkText.length} tokens=$tokens '
+        'preview="$preview"',
+      );
+    }
+
     if (results.isEmpty) {
       log_util.log.i('🔍 [RagService] Không tìm thấy chunks liên quan (threshold=$_threshold)');
       return RagContext(chunks: [], tokenCount: 0);
     }
 
-    // 3. Chunk-level trimming (drop last chunks cho đến khi vừa budget)
+    // 3. Try-fit packing (greedy knapsack, không early break)
     // Mỗi chunk cần tính token của cả chunk text + label overhead (e.g. "[Document 1]\n")
     var tokenSum = 0;
+    final effectiveCap = tokenBudget < kMaxRagTokens ? tokenBudget : kMaxRagTokens;
     final labelTokenOverhead = estimateTokens('\n[Document N]\n');
     final trimmed = <SearchResult>[];
+    var chunkCount = 0;
 
     for (final chunk in results) {
+      // Hard cap: max chunks
+      if (chunkCount >= kMaxRagChunks) break;
+
       final chunkToken = estimateTokens(chunk.chunkText) + labelTokenOverhead;
-      if (tokenSum + chunkToken > tokenBudget) {
-        break;
+
+      // Skip chunk nếu 1 chunk quá lớn so với cap
+      if (chunkToken > effectiveCap) continue;
+
+      // Try-fit: chỉ add nếu còn chỗ
+      if (tokenSum + chunkToken <= effectiveCap) {
+        trimmed.add(chunk);
+        tokenSum += chunkToken;
+        chunkCount++;
+
+        // Safety guard: dừng khi đã đầy budget
+        if (tokenSum >= effectiveCap) break;
       }
-      tokenSum += chunkToken;
-      trimmed.add(chunk);
     }
 
     final returnedChunks = trimmed.length;
     final trimmedChunks = matchedChunks - returnedChunks;
     final ragTokenCount = tokenSum;
+
+    // Log packing result
+    log_util.log.i(
+      '[RAG] packing matched=$matchedChunks packed=$returnedChunks '
+      'tokens=$ragTokenCount cap=$effectiveCap',
+    );
 
     // Tính bestScore từ chunk đầu tiên (đã sort score desc)
     final bestScore = trimmed.isNotEmpty ? trimmed.first.score : null;
