@@ -52,24 +52,14 @@ class AppDatabase extends _$AppDatabase {
       : super(queryExecutor ?? _openConnection());
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async {
           await m.createAll();
-          await customStatement(
-            'CREATE INDEX idx_messages_session ON messages(session_id, created_at)',
-          );
-          await customStatement(
-            'CREATE INDEX idx_chunks_document ON chunks(document_id)',
-          );
-          await customStatement(
-            'CREATE INDEX idx_vectors_chunk ON vectors(chunk_id)',
-          );
-          await customStatement(
-            'CREATE INDEX idx_documents_session ON documents(session_id)',
-          );
+          await _createIndexes();
+          await _createFts5Table();
         },
         onUpgrade: (m, from, to) async {
           if (from < 2) {
@@ -110,8 +100,38 @@ class AppDatabase extends _$AppDatabase {
               'ALTER TABLE documents ADD COLUMN last_processed_at TEXT',
             );
           }
+          if (from < 5) {
+            // Tạo FTS5 virtual table cho BM25 search
+            await _createFts5Table();
+          }
         },
       );
+
+  Future<void> _createIndexes() async {
+    await customStatement(
+      'CREATE INDEX idx_messages_session ON messages(session_id, created_at)',
+    );
+    await customStatement(
+      'CREATE INDEX idx_chunks_document ON chunks(document_id)',
+    );
+    await customStatement(
+      'CREATE INDEX idx_vectors_chunk ON vectors(chunk_id)',
+    );
+    await customStatement(
+      'CREATE INDEX idx_documents_session ON documents(session_id)',
+    );
+  }
+
+  Future<void> _createFts5Table() async {
+    await customStatement('''
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        chunk_id UNINDEXED,
+        document_id UNINDEXED,
+        chunk_text,
+        tokenize='unicode61'
+      )
+    ''');
+  }
 }
 
 LazyDatabase _openConnection() {

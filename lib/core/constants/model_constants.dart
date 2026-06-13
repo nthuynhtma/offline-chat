@@ -10,7 +10,13 @@ const int kGemmaMaxTokens = 2048;
 /// === Context budget ratios (dynamic theo kGemmaMaxTokens) ===
 
 /// Tỉ lệ context dành cho history replay (35%)
+/// Dùng cho turn-by-turn chat.
 const double kHistoryBudgetRatio = 0.35;
+
+/// Tỉ lệ context dành cho history replay khi init session (35%)
+/// Session init KHÔNG dùng dynamic budget (không có query để classify).
+/// Giữ 35% để fit 4-6 messages lúc mở session.
+const double kSessionInitHistoryRatio = 0.35;
 
 /// Tỉ lệ context reserved cho response (25%)
 const double kResponseBudgetRatio = 0.25;

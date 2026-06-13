@@ -22,6 +22,8 @@ import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/prompt/prompt_builder_service.dart';
 import 'package:offline_chat/services/rag/rag_service.dart';
 import 'package:offline_chat/services/rag/rag_service_impl.dart';
+import 'package:offline_chat/services/bm25/bm25_service.dart';
+import 'package:offline_chat/services/bm25/bm25_service_impl.dart';
 import 'package:offline_chat/services/vectorstore/semantic_cache_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 
@@ -56,12 +58,18 @@ Future<void> setupLocator() async {
     () => PromptBuilderImpl(),
   );
 
+  // BM25 service
+  sl.registerLazySingleton<Bm25Service>(
+    () => Bm25ServiceImpl(sl<AppDatabase>()),
+  );
+
   // RAG service
   sl.registerLazySingleton<RagService>(
     () => RagServiceImpl(
       db: sl<AppDatabase>(),
       geckoService: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
+      bm25Service: sl<Bm25Service>(),
     ),
   );
 
@@ -144,6 +152,7 @@ Future<void> setupLocator() async {
       chunker: sl<ChunkingService>(),
       gecko: sl<GeckoService>(),
       vectorStore: sl<VectorStoreService>(),
+      bm25Service: sl<Bm25Service>(),
     ),
   );
 

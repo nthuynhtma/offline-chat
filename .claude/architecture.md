@@ -7,7 +7,7 @@ Flutter App
 │
 ├── Presentation Layer  (Widgets, Pages)
 ├── Bloc Layer          (Business Logic + State Management)
-├── Service Layer       (AI, RAG, Parsing, VectorStore, Memory)
+├── Service Layer       (AI, RAG, Parsing, VectorStore, Memory, BM25)
 └── Data Layer          (Drift/SQLite — DAOs, Tables)
 ```
 
@@ -42,7 +42,8 @@ main()
 | `GemmaService` | `GemmaServiceImpl` | — |
 | `GeckoService` | `GeckoRetryService(GeckoServiceImpl)` | — |
 | `PromptBuilder` | `PromptBuilderImpl` | — |
-| `RagService` | `RagServiceImpl` | AppDatabase, GeckoService, VectorStoreService |
+| `RagService` | `RagServiceImpl` | AppDatabase, GeckoService, VectorStoreService, **Bm25Service** |
+| `Bm25Service` | `Bm25ServiceImpl` | AppDatabase |
 | `ChunkingService` | `ChunkingServiceImpl` | — |
 | `DocumentParserService` | `DocumentParserServiceImpl` | — |
 | `VectorStoreService` | `VectorStoreServiceImpl` | AppDatabase |
@@ -64,7 +65,7 @@ main()
 **Upload Queue:**
 | Component | Scope | Deps |
 |-----------|-------|------|
-| `DocumentUploadQueue` | LazySingleton | DocsDao, ChunksDao, Parser, Chunker, Gecko, VectorStore |
+| `DocumentUploadQueue` | LazySingleton | DocsDao, ChunksDao, Parser, Chunker, Gecko, VectorStore, **Bm25Service** |
 | `DocumentRepository` | LazySingleton | AppDatabase, DocumentUploadQueue |
 
 ---
@@ -140,21 +141,28 @@ ChatBloc({
 })
 ```
 
-### SendMessage Full Flow
+### SendMessage Full Flow (Session API + Dynamic Budget, updated 13/06/2026)
 ```
 1. Guard checks: isClosed? _currentSessionId? is ChatStreaming? _isWaitingForModel?
 2. If gemma not ready: subscribe ModelBloc, _isWaitingForModel=true, return
 3. Save user message → DB → emit ChatThinking
-4. RAG retrieval → RagService.retrieve(query, tokenBudget, scope, sessionId)
-5. Build prompt → PromptBuilder.build(question, ragContext, history, summary, memories)
-6. Ensure Gemma session exists (recreate if !hasActiveSession)
-7. Stream → emit.forEach(gemmaService.generateWithSession(prompt))
+4. [NEW] Dynamic Budget: ContextBudget.forQuery(content) → phân bổ tokens
+   - conversational: history 45% (922), rag 15% (307)
+   - factual: history 10% (205), rag 58% (1188)
+   - complex: history 20% (410), rag 45% (922)
+5. RAG retrieval → RagService.retrieve(query, tokenBudget, scope, sessionId)
+   - [NEW] Hybrid search: Dense (Gecko) + Sparse (BM25) + RRF fusion
+6. Build turn payload → PromptBuilder.buildTurnPayload(question, ragContext)
+   (KHÔNG chứa system, history — chỉ RAG + question, ~300-800 chars)
+7. Ensure Gemma session exists (recreate via _recreateSession() if lost)
+   (Session đã tạo ở init, KHÔNG recreate mỗi turn, KHÔNG addHistoryMessage ở đây)
+8. Stream → emit.forEach(gemmaService.generateWithSession(turnPayload))
    - Each token → emit ChatStreaming
    - Complete → save assistant msg → emit ChatLoaded
    - Error → closeSession → emit ChatError
 ```
 
-### Session Initialization Flow
+### Session Initialization Flow (Session API, updated 13/06/2026)
 ```
 SessionInitialized(sessionId)
   ├→ emit ChatLoading
@@ -163,10 +171,13 @@ SessionInitialized(sessionId)
   ├→ Kiểm tra SessionMemory (summary)
   │    ├→ Có summary → MemoryPromptFormatter.build(summary, memories)
   │    │              → createSession(systemInstruction=summarized)
-  │    │              → replay recent messages (token-based, 15% context)
-  │    └→ Không summary → _createGemmaSessionWithHistory()
-  │                       → createSession("You are AgriAI...")
-  │                       → replay history (35% context budget, từ mới→cũ)
+  │    └→ Không summary → PromptBuilder.buildSystemInstruction(memories)
+  │                       → createSession(systemInstruction)
+  │
+  ├→ [CHỈ 1 LẦN] Replay history (token-based, 35% context — kSessionInitHistoryRatio)
+  │    → addHistoryMessage(role, content) MỘT LẦN DUY NHẤT
+  │    → KHÔNG addHistoryMessage ở turn tiếp theo
+  │
   └→ emit ChatLoaded
 ```
 
@@ -185,6 +196,7 @@ FIFO _processNext() → _processJob():
   Chunk    0.10 → 0.20    ChunkingService.chunk(rawText, chunkSize=200, overlap=50) → chunks[]
   Embed    0.20 → 0.95    GeckoService.embed(chunk) → vector[768] (per chunk, progressive %)
   Insert   0.95 → 1.00    ChunksCompanion batch → Vectors insert batch
+  [NEW] Index BM25         → Bm25Service.indexChunks() → FTS5 chunks_fts table
   Complete 1.00            status=completed, chunkCount updated
 
 Granular progress stream → SessionFilesPanel + AttachedFilesBar
@@ -198,6 +210,9 @@ Chunk logging (thêm 12/06/2026):
   [UploadQueue] Chunks: 4 chunks (chunkSize=200, overlap=50)
   [UploadQueue] chunk[0] chars=752 tokens=301 preview="..."
   Dùng estimateTokens() (cùng estimator với RAG/PromptBuilder)
+
+BM25 Indexing log (thêm 13/06/2026):
+  📚 [BM25] Indexed 8 chunks into FTS5
 ```
 
 ---
@@ -216,49 +231,57 @@ RagService.retrieve(query, tokenBudget, scope, sessionId):
      - globalOnly: getCompletedGlobalDocumentIds()
      - attachedAndGlobal: global + session + ref (all completed)
   3. Nếu allowedDocIds rỗng → early return RagContext.empty
-  4. Vector search → VectorStoreService.search(topK:20, threshold:0.7, allowedDocIds)
-     2-step search: filter → preTopK(200) → cosine → re-rank → topK(20)
-  5. Log candidates: score, chars, tokens, preview (top 3)
-  6. Try-fit packing (VERSION=try_fit_v2):
+  4. [NEW] Dense search → VectorStoreService.search(topK:50, threshold:0.7, allowedDocIds)
+     (topK tăng từ 20 lên 50 cho hybrid search)
+  5. [NEW] Sparse search → Bm25Service.search(query, allowedDocIds, topK:50)
+     - Sanitize query (remove FTS5 special chars)
+     - BM25 ranking với FTS5 unicode61 tokenizer
+     - Filter kết quả theo allowedDocumentIds
+  6. [NEW] Reciprocal Rank Fusion (RRF, k=60):
+     - Fallback: nếu 1 trong 2 nguồn rỗng → dùng nguồn còn lại
+     - Nếu cả 2 rỗng → skip RAG
+  7. Log candidates: VERSION=hybrid_v1 dense=N sparse=M fused=K
+  8. Try-fit packing (VERSION=try_fit_v2):
      - Hard caps: kMaxRagChunks=3, kMaxRagTokens=500
      - effectiveCap = min(tokenBudget, kMaxRagTokens)
      - continue nếu chunk > effectiveCap
      - add nếu còn budget (greedy knapsack)
      - safety guard khi đầy
-  7. Log packing: matched, packed, tokens, cap
-  8. Log RagTelemetry
+  9. Log packing: matched, packed, tokens, cap
+  10. Log RagTelemetry
 
 Return: RagContext(chunks, tokenCount, bestScore)
 ```
 
 ---
 
-## 7. Data Flow — Prompt Building
+## 7. Data Flow — Prompt Building (updated 13/06/2026)
 
+PromptBuilder hiện có 2 methods riêng biệt (VERSION=session_api_v1):
+
+### buildSystemInstruction() — cho createSession()
 ```
-PromptBuilder.build(question, ragContext, history, sessionSummary, userMemories):
-  VERSION=dedup_v1
-
-  Ordering:
-    <start_of_turn>system
-      You are AgriAI...
-      === User Memory ===       (cross-session persona)
-      === Session Summary ===   (conversation state)
-    <end_of_turn>
-
-    === Recent Conversation === (history — budget-based truncation)
-      - kMaxHistoryTokens = 300
-      - Duyệt từ cuối lên đầu, gom messages trong budget
-      - estimateTokens() + role overhead
-
-    === Reference Documents === (RAG chunks — sát question)
-      [Document 1] chunkText
-      [Document 2] chunkText
-
-    === Current Question ===
-    <start_of_turn>user question <end_of_turn>
-    <start_of_turn>model
+CHỈ chứa system + memories + summary. KHÔNG chứa history.
+  <start_of_turn>system
+    You are AgriAI...
+    === User Memory ===       (cross-session persona)
+    === Session Summary ===   (conversation state)
+  <end_of_turn>
 ```
+
+### buildTurnPayload() — cho generateWithSession()
+```
+CHỈ chứa RAG + question. KHÔNG chứa system/history.
+  === Reference Documents === (RAG chunks — nếu có)
+    [Document 1] chunkText
+    [Document 2] chunkText
+
+  === Current Question ===
+  user question (KHÔNG turn markers — generateWithSession tự wrap)
+```
+
+### Legacy build() (VERSION=dedup_v1)
+Giữ lại cho SummaryService (dùng generateStream legacy). KHÔNG dùng cho chat turns.
 
 ---
 
@@ -281,6 +304,7 @@ Legacy API (dùng bởi SummaryService):
 ⚠️ LiteRT LM constraint: Chỉ support 1 session tại 1 thời điểm.
   Legacy generate() invalidates session → hasActiveSession guard ở ChatBloc.
   generate()/generateStream() set _session=null trước createSession().
+  ⚠️ KHÔNG dùng generate() cho query rewriting — destroys active session.
 
 P0 Logging (12/06/2026):
   generateWithSession: sessionActive, promptLength, maxTokens, sessionHash
@@ -303,7 +327,7 @@ FIFO lock: _runLocked<T>(fn) — Completer-based, tránh race GPU/FFI
 ⚠️ Gecko_256_quant suspicion (12/06/2026):
   Score ranking barely changes across different Vietnamese queries.
   chunk[0] (giới thiệu chung) always top 1.
-  Cần test lại với chunkSize=200 sau khi fix GPU crash.
+  Đã giảm thiểu nhờ Hybrid Search BM25 (13/06/2026).
 ```
 
 ### VectorStoreService (SQLite Cosine Search)
@@ -314,7 +338,25 @@ Search: brute-force cosine similarity
 
 2-step search:
   1. Filter candidates bằng allowedDocumentIds
-  2. Pre-topK (200) → cosine similarity → re-rank → topK (20)
+  2. Pre-topK (200) → cosine similarity → re-rank → topK (50 cho hybrid search)
+```
+
+### Bm25Service (SQLite FTS5 — NEW 13/06/2026)
+```
+Interface:
+  search(query, allowedDocumentIds, topK) → List<SearchResult>
+  indexChunk(chunkId, documentId, chunkText) → void
+  indexChunks(chunks) → void
+  deleteByChunkIds(chunkIds) → void
+
+Implementation: Bm25ServiceImpl
+  Database: SQLite FTS5 virtual table (chunks_fts)
+  Tokenizer: unicode61 (hỗ trợ tiếng Việt Unicode)
+  Ranking: BM25 (hàm bm25() built-in của SQLite)
+  Query sanitize: remove FTS5 special chars ( ) * ^ " ~ : +
+  Phrase search: wrap multi-word queries trong double quotes
+
+  VERSION=bm25_v1
 ```
 
 ### ChunkingService
@@ -344,12 +386,20 @@ MemoryBudgetConfig (dynamic theo context window):
   summaryTrigger:     available * 0.65
 ```
 
-### PromptBuilder (VERSION=dedup_v1)
+### PromptBuilder (VERSION=session_api_v1, updated 13/06/2026)
 ```
-History truncation: budget-based (kMaxHistoryTokens=300)
-  - Duyệt từ cuối lên đầu
-  - estimateTokens() + role overhead
-  - Selected reversed để giữ thứ tự thời gian
+2 methods riêng biệt:
+  buildSystemInstruction({sessionSummary?, userMemories?})
+    → System prompt + memories + summary (có <start_of_turn>system<end_of_turn>)
+    → Dùng cho createSession()
+    → KHÔNG chứa history
+
+  buildTurnPayload({question, ragContext})
+    → RAG context + question (KHÔNG turn markers)
+    → Dùng cho generateWithSession()
+    → KHÔNG chứa system/history
+
+Method cũ build() (VERSION=dedup_v1) giữ cho SummaryService legacy.
 ```
 
 ### DocumentUploadQueue — FIFO Pipeline
@@ -357,6 +407,7 @@ History truncation: budget-based (kMaxHistoryTokens=300)
 chunkSize=200, overlap=50 (runtime default 12/06/2026)
 Gecko Embedding Guard: throw UploadQueueException nếu Gecko chưa ready
 Chunk logging: chars, tokens (estimateTokens), preview (safe substring min 60)
+[NEW 13/06/2026] BM25 indexing: sau khi insert chunks/vectors, index vào FTS5
 ```
 
 ---
@@ -376,6 +427,7 @@ AppException (base)
 Runtime errors (non-AppException):
   Bad state: Session is closed → FFI session invalidated by legacy generate()
     → Guarded bởi hasActiveSession check tại ChatBloc dòng 389
+  BM25 search error → graceful degradation, fallback về dense search
 ```
 
 ---
@@ -441,7 +493,7 @@ estimateMessageTokens(text): estimateTokens(text) + 5 (role overhead)
 Dùng bởi:
   - RAG packing (try-fit)
   - PromptBuilder history truncation
-  - Context Budget calculation
+  - Context Budget calculation (static + dynamic)
   - UploadQueue chunk logging
 ```
 
@@ -449,14 +501,37 @@ Dùng bởi:
 
 ## 13. Context Budget (Runtime Dynamic)
 
+### Static Budget (legacy, dùng cho MemoryBudgetConfig)
 ```
 kGemmaMaxTokens = 2048
-historyBudgetRatio  = 0.35 (≈717 tok)
-responseBudgetRatio = 0.25 (≈512 tok)
-systemBudgetRatio   = 0.10 (≈205 tok)
-ragBudget = max(0, 2048 - history - response - system - question)
+kHistoryBudgetRatio  = 0.35 (≈717 tok)
+kResponseBudgetRatio = 0.25 (≈512 tok)
+kSystemBudgetRatio   = 0.10 (≈205 tok)
+kSessionInitHistoryRatio = 0.35 (dùng cho session init)
 
 KHÔNG dùng hardcode totalBudget=8000 cũ.
+```
+
+### Dynamic Budget Allocation (NEW 13/06/2026)
+```
+File: lib/core/constants/budget_allocation.dart
+
+Query classification (heuristics, không dùng model):
+  - conversational: greeting, câu <15 ký tự, "bạn là ai"
+  - factual: thông tin cụ thể (default)
+  - complex: "phân tích", "tại sao", "như thế nào"
+
+Budget ratios theo query type:
+
+| Type | System | Memory | History | RAG | Response | Total |
+|------|--------|--------|---------|-----|----------|-------|
+| conversational | 10% | 5% | 45% | 15% | 25% | 100% |
+| factual | 5% | 2% | 10% | 58% | 25% | 100% |
+| complex | 5% | 5% | 20% | 45% | 25% | 100% |
+
+Session init luôn dùng kSessionInitHistoryRatio=0.35 (không dynamic).
+
+VERSION=dynamic_budget_v1
 ```
 
 ---
@@ -497,21 +572,29 @@ Delete Session → Sessions ON DELETE CASCADE
 | File | Marker | Purpose | Added |
 |------|--------|---------|-------|
 | `rag_service_impl.dart` | `VERSION=try_fit_v2` | Verify RAG packing code đang chạy | 12/06/2026 |
-| `prompt_builder_service.dart` | `VERSION=dedup_v1` | Verify PromptBuilder code đang chạy | 12/06/2026 |
+| `rag_service_impl.dart` | `VERSION=hybrid_v1` | Verify hybrid search (dense+sparse+RRF) đang chạy | **13/06/2026** |
+| `prompt_builder_service.dart` | `VERSION=session_api_v1` | Verify PromptBuilder code mới | 13/06/2026 |
+| `budget_allocation.dart` | `VERSION=dynamic_budget_v1` | Verify Dynamic Budget Allocation | **13/06/2026** |
+| `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation | **13/06/2026** |
 
 ---
 
-## 16. Performance Observations (thực tế từ runtime)
+## 16. Performance Observations (thực tế từ runtime, verified 13/06/2026)
+
+| Metric | Không RAG (34 chars) | Có RAG (313 chars) |
+|--------|---------------------|--------------------|
+| TTFT (prefill) | **1.2 giây** | **6.7 giây** |
+| Total generation | 27.5 giây (188 tok) | 26.2 giây (167 tok) |
+| Throughput | ~7.1 tok/s | **~8.5 tok/s** |
+| Embedding latency | — | ~947ms |
+| Search latency | — | ~86ms |
 
 | Metric | Giá trị thực tế |
 |--------|----------------|
-| TTFT (GPU, ~2500 token prompt) | 5-10 giây |
-| Token/s (GPU, Gemma 4-E2B) | ~7-8 tok/s |
-| Embedding latency (Gecko) | ~850ms/chunk |
-| Search latency (4 chunks) | < 100ms |
-| App cold start (bao gồm model init) | ~13 giây |
+| GPU crash rate (tested 13/06) | **~0%** (0 crash / 2 queries + 4 uploads) |
+| Cold start (bao gồm model init) | ~13 giây |
 
-⚠️ GPU crash khi prompt có RAG chunks (đang điều tra, 12/06/2026).
+⚠️ GPU crash khi prompt có RAG chunks — đã giảm thiểu nhờ turn payload giảm + dynamic budget.
 
 ---
 
@@ -548,3 +631,13 @@ session_memory: sessionId PK FK, summary TEXT, summaryVersion INT,
 -- User Memory
 user_memory: namespace TEXT, key TEXT, value TEXT, updatedAt
              PK: (namespace, key)
+
+-- [NEW 13/06/2026] FTS5 Virtual Table for BM25 search
+chunks_fts: VIRTUAL TABLE (FTS5)
+  - chunk_id UNINDEXED TEXT
+  - document_id UNINDEXED TEXT
+  - chunk_text (full-text indexed)
+  - tokenize='unicode61'
+  - Tạo bằng raw SQL trong migration (schemaVersion 5)
+  - KHÔNG có Drift table class (virtual table)
+  - SQL: CREATE VIRTUAL TABLE chunks_fts USING fts5(...)

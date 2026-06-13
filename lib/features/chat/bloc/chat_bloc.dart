@@ -15,6 +15,7 @@ import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
 import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/core/constants/budget_allocation.dart';
 import 'package:offline_chat/services/memory_store/memory_store_service.dart';
 import 'package:offline_chat/services/memory_store/summary_service.dart';
 import 'package:offline_chat/services/memory_store/memory_prompt_formatter.dart';
@@ -232,55 +233,65 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       // Kiểm tra xem có SessionMemory (summary) không
       final memoryRow = await _memoryStore.getSessionMemory(event.sessionId);
 
-      if (memoryRow?.summary != null && memoryRow!.summary!.isNotEmpty) {
-        // Có summary → inject vào system instruction + replay recent messages
-        if (!_gemmaService.isReady) {
-          log_util.log.w('⚠️ [Session] Gemma chưa ready — skip session creation, load messages only');
-          emit(ChatLoaded(messages, knowledgeScope: _currentScope));
-          return;
-        }
-        final userMemories = await _memoryStore.getAllUserMemories();
-        final userMemoryList = <({String nspace, String key, String value})>[];
-        for (final m in userMemories) {
-          userMemoryList.add((nspace: m.namespace, key: m.key, value: m.value));
-        }
+      if (!_gemmaService.isReady) {
+        log_util.log.w('⚠️ [Session] Gemma chưa ready — skip session creation, load messages only');
+        emit(ChatLoaded(messages, knowledgeScope: _currentScope));
+        return;
+      }
 
-        final systemInstruction = MemoryPromptFormatter.build(
+      // ─── FIX: Đúng kiến trúc Session API ─────────────────────────────
+      // 1. Build system instruction (KHÔNG chứa history)
+      final userMemories = await _memoryStore.getAllUserMemories();
+      final userMemoryList = <({String nspace, String key, String value})>[];
+      for (final m in userMemories) {
+        userMemoryList.add((nspace: m.namespace, key: m.key, value: m.value));
+      }
+
+      final String systemInstruction;
+      if (memoryRow?.summary != null && memoryRow!.summary!.isNotEmpty) {
+        // Có summary → dùng MemoryPromptFormatter
+        systemInstruction = MemoryPromptFormatter.build(
           summary: memoryRow.summary,
           userMemories: userMemoryList,
         );
-
-        await _gemmaService.createSession(
-          systemInstruction: systemInstruction,
-        );
-        log_util.log.i('🧠 [Session] Created with summary (v${memoryRow.summaryVersion}, ~${memoryRow.estTokens}tok)');
-
-        // Replay N messages gần nhất (token-based, dùng recentConversationBudget)
-        final recentBudget = _memoryBudget.recentConversationBudget;
-        final recentMessages = <MessageModel>[];
-        var recentTokenSum = 0;
-        for (int i = messages.length - 1; i >= 0; i--) {
-          final msgToken = estimateMessageTokens(messages[i].content);
-          if (recentTokenSum + msgToken > recentBudget) break;
-          recentTokenSum += msgToken;
-          recentMessages.insert(0, messages[i]);
-        }
-
-        for (final msg in recentMessages) {
-          await _gemmaService.addHistoryMessage(
-            msg.role.name,
-            msg.content,
-          );
-        }
-        log_util.log.i(
-            '🔄 [Session] Replayed ${recentMessages.length} recent messages (~${recentTokenSum}tok budget=${recentBudget}tok)');
+        log_util.log.i('🧠 [Session] Using summary (v${memoryRow.summaryVersion}, ~${memoryRow.estTokens}tok)');
       } else {
-        // Không có summary → replay history bình thường (token-budget)
-        await _createGemmaSessionWithHistory(messages);
+        // Không có summary → dùng PromptBuilder.buildSystemInstruction
+        final userMemoryObjects = userMemories
+            .map((m) => UserMemory(namespace: m.namespace, key: m.key, value: m.value))
+            .toList();
+        systemInstruction = await _promptBuilder.buildSystemInstruction(
+          userMemories: userMemoryObjects,
+        );
+        log_util.log.i('🧠 [Session] Using default system instruction');
       }
+
+      // 2. Tạo session với system instruction
+      await _gemmaService.createSession(systemInstruction: systemInstruction);
+      log_util.log.i('🆕 [Session] Gemma session created with system instruction');
+
+      // 3. Replay history MỘT LẦN DUY NHẤT (token-budget)
+      // Session init dùng kSessionInitHistoryRatio (35%) — KHÔNG dùng dynamic budget
+      final historyBudget = (kGemmaMaxTokens * kSessionInitHistoryRatio).round();
+      final historyMessages = <MessageModel>[];
+      var historyTokenSum = 0;
+
+      for (int i = messages.length - 1; i >= 0; i--) {
+        final msgToken = estimateMessageTokens(messages[i].content);
+        if (historyTokenSum + msgToken > historyBudget) break;
+        historyTokenSum += msgToken;
+        historyMessages.insert(0, messages[i]);
+      }
+
+      for (final msg in historyMessages) {
+        await _gemmaService.addHistoryMessage(msg.role.name, msg.content);
+      }
+      log_util.log.i(
+          '🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
 
       emit(ChatLoaded(messages, knowledgeScope: _currentScope));
     } catch (e) {
+      log_util.log.e('⛔ [Session] Error: $e');
       emit(ChatError(
         message: e.toString(),
         knowledgeScope: _currentScope,
@@ -374,29 +385,32 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       emit(ChatThinking(currentMessages, knowledgeScope: _currentScope));
 
       // ─── 2. RAG retrieval via RagService ─────────────────────────────
-      // Tính token budget động cho RAG
-      final historyBudget = (kGemmaMaxTokens * kHistoryBudgetRatio).round();
-      final reservedResponse = (kGemmaMaxTokens * kResponseBudgetRatio).round();
-      final reservedSystem = (kGemmaMaxTokens * kSystemBudgetRatio).round();
+      // VERSION=dynamic_budget_v1 - Phân bổ budget động theo loại câu hỏi
+      final queryBudget = ContextBudget.forQuery(event.content);
+      final allocation = queryBudget.calculate(kGemmaMaxTokens);
       final questionTokens = estimateTokens(event.content);
 
+      // Tính history tokens thực tế (không vượt quá budget)
       var historyTokenSum = 0;
       for (int i = _currentMessages.length - 1; i >= 0; i--) {
         final msgToken = estimateMessageTokens(_currentMessages[i].content);
-        if (historyTokenSum + msgToken > historyBudget) break;
+        if (historyTokenSum + msgToken > allocation.historyTokens) break;
         historyTokenSum += msgToken;
       }
 
-      final ragBudget = kGemmaMaxTokens - historyTokenSum - reservedResponse - reservedSystem - questionTokens;
+      // RAG budget = allocation.ragTokens - questionTokens
+      // (question tokens được trừ khỏi RAG budget để tránh tràn context window)
+      final ragBudget = (allocation.ragTokens - questionTokens).clamp(0, kGemmaMaxTokens);
 
       log_util.log.i(
-        '📊 Context Budget: '
-        'history=$historyTokenSum, '
-        'response=$reservedResponse, '
-        'system=$reservedSystem, '
+        '📊 [Budget] VERSION=dynamic_budget_v1 '
+        'queryType=${queryBudget.queryType.name}, '
+        'allocation=$allocation, '
+        'actualHistory=$historyTokenSum/${allocation.historyTokens}, '
         'question=$questionTokens, '
-        'rag=$ragBudget, '
-        'total=${historyTokenSum + reservedResponse + reservedSystem + questionTokens + ragBudget.clamp(0, kGemmaMaxTokens)}',
+        'rag=$ragBudget/${allocation.ragTokens}, '
+        'response=${allocation.responseTokens}, '
+        'total=${historyTokenSum + allocation.responseTokens + allocation.systemTokens + questionTokens + ragBudget}',
       );
 
       // Load KnowledgeScope từ session
@@ -410,35 +424,28 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
         sessionId: _currentSessionId,
       );
 
-      // 3. Build prompt via PromptBuilder
-      final userMemories = await _memoryStore.getAllUserMemories();
-      final userMemoryList =
-          userMemories.map((m) => UserMemory(namespace: m.namespace, key: m.key, value: m.value)).toList();
+      // ─── 3. FIX: Đảm bảo session tồn tại (KHÔNG recreate) ─────────────
+      // Session đã được tạo ở _onSessionInitialized, chỉ tạo mới nếu bị mất
+      if (!_gemmaService.hasActiveSession) {
+        log_util.log.w('⚠️ [Session] Session bị mất — tạo lại session mới...');
+        await _recreateSession();
+      }
 
-      final memoryRow = await _memoryStore.getSessionMemory(_currentSessionId!);
-
-      final prompt = await _promptBuilder.build(
+      // ─── 4. Build turn payload (RAG + question, KHÔNG có history) ─────
+      final turnPayload = await _promptBuilder.buildTurnPayload(
         question: event.content,
         ragContext: ragContext,
-        history: _currentMessages,
-        sessionSummary: memoryRow?.summary,
-        userMemories: userMemoryList,
       );
 
       log_util.log.i('🔍 [RAG] Tìm thấy ${ragContext.chunks.length} chunks liên quan');
-
-      // 4. Đảm bảo session tồn tại
-      if (!_gemmaService.hasActiveSession) {
-        log_util.log.i('🔄 [Session] Tạo Gemma session mới...');
-        await _createGemmaSessionWithHistory(_currentMessages);
-      }
+      log_util.log.i('📝 [Turn] Payload length: ${turnPayload.length} chars');
 
       // 5. Stream response qua session API
       final assistantMsgId = _uuid.v4();
       log_util.log.i('🚀 [Stream] Bắt đầu generateWithSession (assistantMsgId=$assistantMsgId)');
 
       await emit.forEach<String>(
-        _gemmaService.generateWithSession(prompt),
+        _gemmaService.generateWithSession(turnPayload),
         onData: (token) {
           _accumulatedText += token;
           return ChatStreaming(
@@ -503,6 +510,55 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     }
   }
 
+  /// Tạo lại session khi bị mất (giữa chừng).
+  Future<void> _recreateSession() async {
+    if (!_gemmaService.isReady) return;
+
+    // Build system instruction
+    final userMemories = await _memoryStore.getAllUserMemories();
+    final userMemoryObjects = userMemories
+        .map((m) => UserMemory(namespace: m.namespace, key: m.key, value: m.value))
+        .toList();
+
+    final memoryRow = await _memoryStore.getSessionMemory(_currentSessionId!);
+    final String systemInstruction;
+
+    if (memoryRow?.summary != null && memoryRow!.summary!.isNotEmpty) {
+      final userMemoryList = <({String nspace, String key, String value})>[];
+      for (final m in userMemories) {
+        userMemoryList.add((nspace: m.namespace, key: m.key, value: m.value));
+      }
+      systemInstruction = MemoryPromptFormatter.build(
+        summary: memoryRow.summary,
+        userMemories: userMemoryList,
+      );
+    } else {
+      systemInstruction = await _promptBuilder.buildSystemInstruction(
+        userMemories: userMemoryObjects,
+      );
+    }
+
+    await _gemmaService.createSession(systemInstruction: systemInstruction);
+    log_util.log.i('🆕 [Session] Recreated session with system instruction');
+
+    // Replay history (dùng kSessionInitHistoryRatio — đồng bộ với _onSessionInitialized)
+    final historyBudget = (kGemmaMaxTokens * kSessionInitHistoryRatio).round();
+    final historyMessages = <MessageModel>[];
+    var historyTokenSum = 0;
+
+    for (int i = _currentMessages.length - 1; i >= 0; i--) {
+      final msgToken = estimateMessageTokens(_currentMessages[i].content);
+      if (historyTokenSum + msgToken > historyBudget) break;
+      historyTokenSum += msgToken;
+      historyMessages.insert(0, _currentMessages[i]);
+    }
+
+    for (final msg in historyMessages) {
+      await _gemmaService.addHistoryMessage(msg.role.name, msg.content);
+    }
+    log_util.log.i('🔄 [Session] Replayed ${historyMessages.length} messages (~${historyTokenSum}tok)');
+  }
+
   void _onModelBecameReady(
     ModelBecameReady event,
     Emitter<ChatState> emit,
@@ -559,6 +615,10 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
 
     final streamingState = state as ChatStreaming;
 
+    // Đóng session Gemma để dừng stream thực sự (fix Bug C)
+    await _gemmaService.closeSession();
+    log_util.log.i('🛑 [Stream] Streaming cancelled — session closed');
+
     if (_accumulatedText.isNotEmpty && _currentSessionId != null) {
       try {
         // Lưu partial response với suffix [đã dừng]
@@ -602,61 +662,6 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
     } catch (e) {
       emit(ChatError(message: e.toString(), messages: _currentMessages, knowledgeScope: _currentScope));
     }
-  }
-
-  /// Tạo Gemma session mới với system instruction và replay history.
-  Future<void> _createGemmaSessionWithHistory(List<MessageModel> messages) async {
-    if (!_gemmaService.isReady) return;
-
-    // System instruction là "linh hồn" của AgriAI
-    const systemInstruction = '''
-You are AgriAI, an agricultural assistant running completely offline on a mobile device.
-
-Your primary purpose is to help users with:
-- Crop cultivation and management
-- Soil health and fertilization
-- Pest and disease identification
-- Irrigation and water management
-- Livestock and poultry farming
-- Agricultural best practices
-- Sustainable farming techniques
-
-Instructions:
-- Answer in the same language as the user.
-- Provide practical, clear, and actionable agricultural advice.
-- If you are uncertain, clearly state your uncertainty instead of guessing.
-- Keep answers concise unless the user asks for more detail.
-- Explain agricultural terms in simple language.
-- Do not claim to have internet access, real-time data, weather data, or external services.
-- Remember that you operate completely offline on the user's mobile device.
-''';
-
-    await _gemmaService.createSession(
-      systemInstruction: systemInstruction,
-    );
-    log_util.log.i('🆕 [Session] Gemma session created');
-
-    // Replay lịch sử chat vào session dựa trên token budget
-    // Duyệt từ message mới nhất → cũ nhất, dừng khi đạt historyBudget (35% context)
-    final historyBudget = (kGemmaMaxTokens * kHistoryBudgetRatio).round();
-    final historyMessages = <MessageModel>[];
-    var historyTokenSum = 0;
-
-    for (int i = messages.length - 1; i >= 0; i--) {
-      final msgToken = estimateMessageTokens(messages[i].content);
-      if (historyTokenSum + msgToken > historyBudget) break;
-      historyTokenSum += msgToken;
-      historyMessages.insert(0, messages[i]);
-    }
-
-    for (final msg in historyMessages) {
-      await _gemmaService.addHistoryMessage(
-        msg.role.name,
-        msg.content,
-      );
-    }
-    log_util.log.i(
-        '🔄 [Session] Replayed ${historyMessages.length}/${messages.length} messages (~${historyTokenSum}tok budget=${historyBudget}tok)');
   }
 
   // ─── Auto Summary ────────────────────────────────────────────────────

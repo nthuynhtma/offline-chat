@@ -3,6 +3,7 @@ import 'package:offline_chat/core/constants/model_constants.dart';
 import 'package:offline_chat/core/utils/logger.dart' as log_util;
 import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/database/app_database.dart';
+import 'package:offline_chat/services/bm25/bm25_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/rag/rag_context.dart';
 import 'package:offline_chat/services/rag/rag_service.dart';
@@ -21,25 +22,31 @@ enum RagSkipReason { greeting, tooShort, capability }
 /// 4. Log telemetry
 /// 5. Return RagContext
 /// 
-/// VERSION=try_fit_v2
+/// VERSION=hybrid_v1 (hybrid search: dense + sparse + RRF)
 class RagServiceImpl implements RagService {
   final AppDatabase _db;
   final GeckoService _geckoService;
   final VectorStoreService _vectorStore;
+  final Bm25Service _bm25Service;
 
-  /// topK mặc định cho vector search (có thể tune sau).
-  static const int _topK = 20;
+  /// topK cho vector search và BM25 search (hybrid search cần 50 candidates).
+  static const int _topK = 50;
 
-  /// Threshold cố định 0.7 (sẽ dynamic sau khi có dữ liệu thực tế).
+  /// Threshold cho cosine similarity.
   static const double _threshold = 0.7;
+
+  /// RRF constant (k=60 là giá trị chuẩn).
+  static const int _rrfK = 60;
 
   RagServiceImpl({
     required AppDatabase db,
     required GeckoService geckoService,
     required VectorStoreService vectorStore,
+    required Bm25Service bm25Service,
   })  : _db = db,
         _geckoService = geckoService,
-        _vectorStore = vectorStore;
+        _vectorStore = vectorStore,
+        _bm25Service = bm25Service;
 
   /// Kiểm tra query có phải no-context (greeting, capability, quá ngắn) hay không.
   /// Trả về [RagSkipReason] nếu skip, null nếu không.
@@ -143,10 +150,10 @@ class RagServiceImpl implements RagService {
       return RagContext(chunks: [], tokenCount: 0);
     }
 
-    // 3. Vector search với allowedDocumentIds
-    List<SearchResult> results;
+    // 3. Vector search (dense) với allowedDocumentIds
+    List<SearchResult> denseResults;
     try {
-      results = await _vectorStore.search(
+      denseResults = await _vectorStore.search(
         queryVector: queryVector,
         topK: _topK,
         threshold: _threshold,
@@ -156,10 +163,42 @@ class RagServiceImpl implements RagService {
       log_util.log.w('⚠️ [RagService] Lỗi vector search: $e — graceful degradation');
       return RagContext(chunks: [], tokenCount: 0);
     }
-    final searchTime = stopwatch.elapsedMilliseconds - embedTime;
+    final denseSearchTime = stopwatch.elapsedMilliseconds - embedTime;
+
+    // 4. Sparse search (BM25)
+    List<SearchResult> sparseResults;
+    try {
+      sparseResults = await _bm25Service.search(
+        query: query,
+        allowedDocumentIds: allowedDocIds ?? <String>{},
+        topK: _topK,
+      );
+    } catch (e) {
+      log_util.log.w('⚠️ [RagService] Lỗi BM25 search: $e — graceful degradation');
+      sparseResults = [];
+    }
+    final sparseSearchTime = stopwatch.elapsedMilliseconds - embedTime - denseSearchTime;
     final totalTime = stopwatch.elapsedMilliseconds;
 
-    // Collect top scores (giới hạn theo kTelemetryTopScoresCount)
+    // 5. Reciprocal Rank Fusion (RRF) + fallback nếu 1 trong 2 nguồn rỗng
+    final List<SearchResult> results;
+    final int denseCount = denseResults.length;
+    final int sparseCount = sparseResults.length;
+
+    if (denseResults.isEmpty && sparseResults.isEmpty) {
+      log_util.log.i('🔍 [RagService] Không tìm thấy chunks liên quan (cả dense và sparse đều rỗng)');
+      return RagContext(chunks: [], tokenCount: 0);
+    } else if (denseResults.isEmpty) {
+      results = sparseResults;
+      log_util.log.d('[RAG] Fallback: chỉ có sparse results (dense rỗng)');
+    } else if (sparseResults.isEmpty) {
+      results = denseResults;
+      log_util.log.d('[RAG] Fallback: chỉ có dense results (sparse rỗng)');
+    } else {
+      results = _reciprocalRankFusion(denseResults, sparseResults);
+    }
+
+    // Collect top scores
     final topScores = results
         .take(kTelemetryTopScoresCount)
         .map((r) => r.score)
@@ -167,8 +206,8 @@ class RagServiceImpl implements RagService {
 
     final matchedChunks = results.length;
 
-    // Log candidates info (top 3 chunks): score, chars, estimatedTokens, preview
-    log_util.log.i('[RAG] VERSION=try_fit_v2');
+    // Log candidates info (top 3 chunks)
+    log_util.log.i('[RAG] VERSION=hybrid_v1 dense=$denseCount sparse=$sparseCount fused=$matchedChunks');
     for (final c in results.take(3)) {
       final tokens = estimateTokens(c.chunkText);
       final preview = c.chunkText.length > 150
@@ -181,12 +220,7 @@ class RagServiceImpl implements RagService {
       );
     }
 
-    if (results.isEmpty) {
-      log_util.log.i('🔍 [RagService] Không tìm thấy chunks liên quan (threshold=$_threshold)');
-      return RagContext(chunks: [], tokenCount: 0);
-    }
-
-    // 3. Try-fit packing (greedy knapsack, không early break)
+    // 6. Try-fit packing (greedy knapsack, không early break)
     // Mỗi chunk cần tính token của cả chunk text + label overhead (e.g. "[Document 1]\n")
     var tokenSum = 0;
     final effectiveCap = tokenBudget < kMaxRagTokens ? tokenBudget : kMaxRagTokens;
@@ -227,11 +261,11 @@ class RagServiceImpl implements RagService {
     // Tính bestScore từ chunk đầu tiên (đã sort score desc)
     final bestScore = trimmed.isNotEmpty ? trimmed.first.score : null;
 
-    // 4. Log telemetry
+    // 7. Log telemetry
     final telemetry = RagTelemetry(
       query: query,
       embeddingTimeMs: embedTime,
-      searchTimeMs: searchTime,
+      searchTimeMs: denseSearchTime + sparseSearchTime,
       retrievalTimeMs: totalTime,
       topScores: topScores,
       matchedChunks: matchedChunks,
@@ -247,5 +281,42 @@ class RagServiceImpl implements RagService {
       tokenCount: ragTokenCount,
       bestScore: bestScore,
     );
+  }
+
+  /// Reciprocal Rank Fusion: kết hợp dense và sparse search results.
+  /// [k] = RRF constant (60 là giá trị chuẩn).
+  List<SearchResult> _reciprocalRankFusion(
+    List<SearchResult> denseResults,
+    List<SearchResult> sparseResults,
+  ) {
+    final scores = <String, double>{};
+    final chunkMap = <String, SearchResult>{};
+
+    // Dense search scores
+    for (int i = 0; i < denseResults.length; i++) {
+      final chunk = denseResults[i];
+      scores[chunk.chunkId] = (scores[chunk.chunkId] ?? 0) + (1.0 / (_rrfK + i + 1));
+      chunkMap[chunk.chunkId] = chunk;
+    }
+
+    // Sparse search scores
+    for (int i = 0; i < sparseResults.length; i++) {
+      final chunk = sparseResults[i];
+      scores[chunk.chunkId] = (scores[chunk.chunkId] ?? 0) + (1.0 / (_rrfK + i + 1));
+      chunkMap[chunk.chunkId] = chunk;
+    }
+
+    // Sort by fused score (descending)
+    final sorted = scores.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return sorted.map((e) {
+      final chunk = chunkMap[e.key]!;
+      return SearchResult(
+        chunkId: chunk.chunkId,
+        score: e.value, // Fused score
+        chunkText: chunk.chunkText,
+      );
+    }).toList();
   }
 }

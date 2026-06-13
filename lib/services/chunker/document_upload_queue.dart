@@ -10,6 +10,7 @@ import 'package:offline_chat/core/utils/logger.dart' as logger;
 import 'package:offline_chat/core/utils/token_estimator.dart';
 import 'package:offline_chat/database/app_database.dart';
 import 'package:offline_chat/services/chunker/chunking_service.dart';
+import 'package:offline_chat/services/bm25/bm25_service.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
 import 'package:offline_chat/services/parser/document_parser_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
@@ -55,6 +56,7 @@ class DocumentUploadQueue {
   final ChunkingService _chunker;
   final GeckoService _gecko;
   final VectorStoreService _vectorStore;
+  final Bm25Service _bm25Service;
 
   /// FIFO chain: job hiện tại đang chạy (null nếu idle).
   Future<void>? _currentJob;
@@ -82,12 +84,14 @@ class DocumentUploadQueue {
     required ChunkingService chunker,
     required GeckoService gecko,
     required VectorStoreService vectorStore,
+    required Bm25Service bm25Service,
   })  : _docsDao = docsDao,
         _chunksDao = chunksDao,
         _parser = parser,
         _chunker = chunker,
         _gecko = gecko,
-        _vectorStore = vectorStore;
+        _vectorStore = vectorStore,
+        _bm25Service = bm25Service;
 
   /// Enqueue một job. Trả về documentId.
   /// Nếu queue đang idle, tự động start processing.
@@ -265,6 +269,15 @@ class DocumentUploadQueue {
       if (vectorEntries.isNotEmpty) {
         await _vectorStore.insertBatch(vectorEntries);
       }
+
+      // ─── Step 4b: Index chunks cho BM25 search ────────────────────
+      await _bm25Service.indexChunks(
+        insertedChunks.map((c) => (
+          id: c.id,
+          documentId: c.documentId,
+          text: c.chunkText,
+        )).toList(),
+      );
 
       // ─── Step 5: Finalize ─────────────────────────────────────────────
       await _docsDao.updateChunkCount(job.documentId, chunks.length);
