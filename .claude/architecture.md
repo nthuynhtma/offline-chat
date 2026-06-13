@@ -27,8 +27,14 @@ main()
   ├── SystemChrome.setPreferredOrientations([portraitUp])
   ├── FlutterError.onError (global Flutter error handler)
   ├── ui.PlatformDispatcher.instance.onError (global async error handler)
+  ├── [NEW] Detect device capability → DeviceCapability.detectTier()
+  │     ├── Android: đọc physicalRamSize (MB) → convert GB
+  │     ├── iOS: infer từ model name (iPhone15,2 = high, iPhone14 = medium, ...)
+  │     └── Lưu contextWindow vào DeviceCapabilityHolder.contextWindow
+  │         high (≥8GB)=4096, medium (6GB)=2048, low (≤4GB)=1024
   ├── FlutterGemma.initialize()
-  ├── await setupLocator()     // DI registration (GetIt)
+  ├── await setupLocator()           // DI registration (GetIt)
+  ├── [NEW] sl<GemmaService>().initialize(maxTokens: contextWindow)
   └── runApp(const App())
 ```
 
@@ -67,6 +73,12 @@ main()
 |-----------|-------|------|
 | `DocumentUploadQueue` | LazySingleton | DocsDao, ChunksDao, Parser, Chunker, Gecko, VectorStore, **Bm25Service** |
 | `DocumentRepository` | LazySingleton | AppDatabase, DocumentUploadQueue |
+
+**Utils (NEW):**
+| Component | Scope | Mục đích |
+|-----------|-------|----------|
+| `DeviceCapability` | Static class | Detect device tier, tính contextWindow động |
+| `DeviceCapabilityHolder` | Static class (model_constants.dart) | Lưu contextWindow runtime |
 
 ---
 
@@ -137,7 +149,7 @@ ChatBloc({
   required SummaryService summaryService,
   required RagService ragService,
   required PromptBuilder promptBuilder,
-  int? contextWindow,
+  int? contextWindow,   // [NEW] từ DeviceCapabilityHolder.contextWindow
 })
 ```
 
@@ -150,6 +162,7 @@ ChatBloc({
    - conversational: history 45% (922), rag 15% (307)
    - factual: history 10% (205), rag 58% (1188)
    - complex: history 20% (410), rag 45% (922)
+   (context window lấy từ DeviceCapabilityHolder.contextWindow)
 5. RAG retrieval → RagService.retrieve(query, tokenBudget, scope, sessionId)
    - [NEW] Hybrid search: Dense (Gecko) + Sparse (BM25) + RRF fusion
 6. Build turn payload → PromptBuilder.buildTurnPayload(question, ragContext)
@@ -293,7 +306,10 @@ API: Session-based (turn-based chat)
   createSession(systemInstruction?) → addHistoryMessage(role, content)
   → generateWithSession(userMessage) → Stream<String>
 
-maxTokens: 2048 (kGemmaMaxTokens)
+maxTokens: [NEW] Detect từ device (4096/2048/1024)
+  Khởi tạo trong main(): sl<GemmaService>().initialize(maxTokens: contextWindow)
+  Runtime lấy từ DeviceCapabilityHolder.contextWindow
+
 Backend: PreferredBackend.gpu (CPU fallback đang debug)
 Timeout: 120s
 
@@ -357,6 +373,29 @@ Implementation: Bm25ServiceImpl
   Phrase search: wrap multi-word queries trong double quotes
 
   VERSION=bm25_v1
+```
+
+### DeviceCapability (NEW 13/06/2026)
+```
+File: lib/core/utils/device_capability.dart
+
+DeviceTier enum: { high, medium, low }
+
+DeviceCapability.detectTier() → Future<DeviceTier>
+  Android: deviceInfo.androidInfo.physicalRamSize (MB) / 1024 → GB
+  iOS: infer từ iosInfo.utsname.machine
+    iPhone15,2+ / iPhone16 = high (8GB+)
+    iPhone13-14 = medium (6GB)
+    iPhone SE/older = low (3-4GB)
+  Fallback: medium (nếu không detect được)
+
+DeviceCapability.getContextWindowForTier(tier) → int
+  high: 4096, medium: 2048, low: 1024
+
+DeviceCapabilityHolder (trong model_constants.dart):
+  static int contextWindow = kGemmaMaxTokens  // Mặc định 2048
+  Được set trong main() trước setupLocator
+  Dùng bởi: ChatBloc, GemmaService, MemoryBudgetConfig, BudgetAllocation
 ```
 
 ### ChunkingService
@@ -428,6 +467,7 @@ Runtime errors (non-AppException):
   Bad state: Session is closed → FFI session invalidated by legacy generate()
     → Guarded bởi hasActiveSession check tại ChatBloc dòng 389
   BM25 search error → graceful degradation, fallback về dense search
+  DeviceCapability detect error → fallback medium (2048 tokens)
 ```
 
 ---
@@ -503,7 +543,7 @@ Dùng bởi:
 
 ### Static Budget (legacy, dùng cho MemoryBudgetConfig)
 ```
-kGemmaMaxTokens = 2048
+kGemmaMaxTokens = 2048 (mặc định)
 kHistoryBudgetRatio  = 0.35 (≈717 tok)
 kResponseBudgetRatio = 0.25 (≈512 tok)
 kSystemBudgetRatio   = 0.10 (≈205 tok)
@@ -529,7 +569,7 @@ Query classification (heuristics, song ngữ Việt-Anh, 8 types):
     8. conversational (short): length < 15 ký tự
     9. factual: default (mọi thứ còn lại)
 
-Budget ratios theo query type (2048 tokens):
+Budget ratios theo query type (tính trên DeviceCapabilityHolder.contextWindow):
 
 | Type | System | Memory | History | RAG | Response | Total | Ghi chú |
 |------|--------|--------|---------|-----|----------|-------|---------|
@@ -543,6 +583,23 @@ Budget ratios theo query type (2048 tokens):
 | multiHop | 5% | 5% | 25% | 40% | 25% | 100% | RAG + history |
 
 Session init luôn dùng kSessionInitHistoryRatio=0.35 (không dynamic).
+```
+
+### DeviceCapability (NEW 13/06/2026)
+```
+File: lib/core/utils/device_capability.dart
+
+Detect thiết bị → DeviceTier → contextWindow:
+  ┌────────┬───────────┬──────────────────────────────┐
+  │ Tier   │ RAM       │ contextWindow                │
+  ├────────┼───────────┼──────────────────────────────┤
+  │ high   │ ≥ 8GB     │ 4096 tokens (flagship)       │
+  │ medium │ ~6GB      │ 2048 tokens (mid-range, def) │
+  │ low    │ ≤ 4GB     │ 1024 tokens (giảm crash)     │
+  └────────┴───────────┴──────────────────────────────┘
+
+Holder: DeviceCapabilityHolder.contextWindow (static, set trong main())
+Dùng bởi: ChatBloc, GemmaService.initialize(), BudgetAllocation
 ```
 
 ---
@@ -587,6 +644,7 @@ Delete Session → Sessions ON DELETE CASCADE
 | `prompt_builder_service.dart` | `VERSION=session_api_v1` | Verify PromptBuilder code mới | 13/06/2026 |
 | `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Verify Dynamic Budget Allocation (8 types) | **13/06/2026** |
 | `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation | **13/06/2026** |
+| `device_capability.dart` | (device log) | 📱 [Device] Tier: X, contextWindow: Y | **13/06/2026** |
 
 ---
 
@@ -604,8 +662,9 @@ Delete Session → Sessions ON DELETE CASCADE
 |--------|----------------|
 | GPU crash rate (tested 13/06) | **~0%** (0 crash / 2 queries + 4 uploads) |
 | Cold start (bao gồm model init) | ~13 giây |
+| Device tiers | high=4096, medium=2048, low=1024 |
 
-⚠️ GPU crash khi prompt có RAG chunks — đã giảm thiểu nhờ turn payload giảm + dynamic budget.
+⚠️ GPU crash khi prompt có RAG chunks — đã giảm thiểu nhờ turn payload giảm + dynamic budget + device-aware context window.
 
 ---
 

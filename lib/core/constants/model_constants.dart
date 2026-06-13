@@ -3,9 +3,18 @@ const String kGemmaModelFileName = 'gemma-4-E2B-it.litertlm';
 const String kGeckoModelFileName = 'Gecko_256_quant.tflite';
 const String kGeckoTokenizerFileName = 'sentencepiece.model';
 
-/// Max tokens (context window) cấp cho Gemma runtime.
-/// Model hỗ trợ tới 32K, nhưng mobile RAM giới hạn — dùng 2048 để an toàn.
+/// Max tokens (context window) cấp cho Gemma runtime (mặc định).
+/// Model hỗ trợ tới 32K, nhưng mobile RAM giới hạn.
+/// Giá trị thực tế được detect từ device capability tại runtime.
 const int kGemmaMaxTokens = 2048;
+
+/// Holder cho context window runtime (được set từ DeviceCapability.detectTier()).
+/// Dùng để các service/budget lấy context window động thay vì hardcode.
+class DeviceCapabilityHolder {
+  /// Context window runtime, mặc định 2048.
+  /// Được set trong main() sau khi detect device capability.
+  static int contextWindow = kGemmaMaxTokens;
+}
 
 /// === Context budget ratios (dynamic theo kGemmaMaxTokens) ===
 

@@ -26,6 +26,7 @@ import 'package:offline_chat/services/bm25/bm25_service.dart';
 import 'package:offline_chat/services/bm25/bm25_service_impl.dart';
 import 'package:offline_chat/services/vectorstore/semantic_cache_service.dart';
 import 'package:offline_chat/services/vectorstore/vector_store_service.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
 
 final sl = GetIt.instance;
 
@@ -117,7 +118,7 @@ Future<void> setupLocator() async {
     ),
   );
 
-  // ChatBloc with new RagService + PromptBuilder, removed geckoService/vectorStore
+  // ChatBloc with dynamic contextWindow from DeviceCapabilityHolder
   sl.registerFactory<ChatBloc>(
     () => ChatBloc(
       messageRepo: sl<MessageRepository>(),
@@ -128,6 +129,7 @@ Future<void> setupLocator() async {
       summaryService: sl<SummaryService>(),
       ragService: sl<RagService>(),
       promptBuilder: sl<PromptBuilder>(),
+      contextWindow: DeviceCapabilityHolder.contextWindow,
     ),
   );
 

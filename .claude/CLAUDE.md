@@ -5,9 +5,10 @@
 
 **Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai. Attached Files + Knowledge Scope + RAG completed-only filter đã triển khai.
 
-**13/06/2026 (Evening):** Hoàn thành **2/5 giải pháp tối ưu**:
+**13/06/2026 (Evening):** Hoàn thành **2/5 giải pháp tối ưu** + **DeviceCapability**:
 - ✅ **Solution 1: Dynamic Budget Allocation** (`VERSION=dynamic_budget_v3`) — Phân bổ context budget động theo **8 loại câu hỏi** (conversational/factual/complex/creative/summarization/translation/mathCoding/multiHop). Hỗ trợ song ngữ Việt-Anh. Query classification bằng heuristics (không dùng model). Session init giữ 35% history riêng.
 - ✅ **Solution 2: Hybrid Search BM25** (`VERSION=hybrid_v1`) — Kết hợp dense search (Gecko) + sparse search (BM25 FTS5) + Reciprocal Rank Fusion. Graceful degradation fallback nếu 1 trong 2 nguồn rỗng. topK tăng 20→50.
+- ✅ **DeviceCapability** — Tự động detect RAM/thiết bị để điều chỉnh context window: high (≥8GB) = 4096, medium (6GB) = 2048, low (≤4GB) = 1024 tokens.
 - ⏸️ **Solution 3: Query Rewriting** — DEFER P2 (lý do: `generate()` destroys active session, TTFT +100%, redundant với hybrid search)
 - ⬜ **Solution 4: Contextual Chunking** — Chưa implement
 - ⬜ **Solution 5: Multi-Tier Memory** — Chưa implement
@@ -39,6 +40,7 @@
 | Navigation | go_router | ^17.3.0 |
 | Markdown Rendering | flutter_markdown_plus | ^1.0.7 |
 | Scroll Detection | scrollview_observer | ^1.27.0 |
+| Device Detection | device_info_plus | ^12.4.0 |
 
 ---
 
@@ -54,7 +56,7 @@
 
 ## Ongoing Issues
 
-- 🔴 **P0 — GPU crash** (`clEnqueueReadBuffer` / `litert_tensor_buffer.h:748`) — **Đã giảm thiểu nhờ Session API fix + turn payload giảm.** Dynamic Budget giúp factual queries dành 58% budget cho RAG (1188 tokens) mà không crash. Cần test thêm với nhiều chunks hơn. *(13/06/2026)*
+- 🔴 **P0 — GPU crash** (`clEnqueueReadBuffer` / `litert_tensor_buffer.h:748`) — **Đã giảm thiểu nhờ Session API fix + turn payload giảm + DeviceCapability low-tier (1024 tokens).** Dynamic Budget giúp factual queries dành 58% budget cho RAG (1188 tokens) mà không crash. Cần test thêm với nhiều chunks hơn. *(13/06/2026)*
 - 🟡 **P1 — Gecko_256_quant discrimination** — **Đã giảm thiểu nhờ Hybrid Search BM25.** BM25 boost keyword matching, RRF fusion kết hợp cả semantic + keyword scores. Cần đánh giá định lượng sau khi có dữ liệu test. *(13/06/2026)*
 - 🔵 **P2 — RAG packing density** — packed=1 với budget 500 tokens, mỗi chunk ~300 tokens → chỉ fit 1 chunk. packed=2 đạt được ở chunkSize=200 với 4 chunks. Cần đánh giá thêm. *(12/06/2026)*
 
@@ -77,6 +79,7 @@
 | **Bug A temp fix (recreate session cho RAG)** | Xóa — không còn cần sau refactor Session API | 13/06/2026 |
 | **Dynamic Budget Allocation** | Thêm `budget_allocation.dart` (QueryType, ContextBudget, BudgetAllocation). Sửa `chat_bloc.dart`: phân bổ budget động theo loại câu hỏi. Session init giữ 35% riêng (`kSessionInitHistoryRatio`). | 13/06/2026 |
 | **Hybrid Search BM25** | Thêm `bm25_service.dart` + `bm25_service_impl.dart` (FTS5 + RRF). Sửa `rag_service_impl.dart`: hybrid search pipeline (dense→sparse→RRF→try-fit). Sửa `document_upload_queue.dart`: BM25 indexing step. DB schemaVersion 4→5. | 13/06/2026 |
+| **Dynamic contextWindow theo thiết bị** | Thêm `device_capability.dart` (3-tier: 4096/2048/1024). Sửa `main.dart` + `service_locator.dart`. Dùng `device_info_plus` để detect RAM. | 13/06/2026 |
 
 ---
 
@@ -90,6 +93,7 @@
 | `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Verify Dynamic Budget Allocation code đang chạy (8 query types) | 13/06/2026 |
 | `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation đang chạy | 13/06/2026 |
 | `chat_bloc.dart` | `VERSION=dynamic_budget_v3` (log) | Verify budget phân bổ động trong log | 13/06/2026 |
+| `device_capability.dart` | — | Log: 📱 [Device] Tier: high/medium/low, contextWindow: N | 13/06/2026 |
 
 ---
 
@@ -97,7 +101,7 @@
 
 - **LiteRT LM:** Chỉ support **1 session tại 1 thời điểm**. Legacy `generate()` / `generateStream()` invalidates session → luôn kiểm tra `hasActiveSession` trước khi gọi `generateWithSession()` (guard tại `chat_bloc.dart:389`).
 - **`GemmaService.generate()` DESTROYS active session** — KHÔNG dùng cho query rewriting hoặc bất kỳ mục đích nào khi đang chat. Nếu cần generate tạm, dùng `createSession()` + `generateWithSession()` + `closeSession()` riêng.
-- **Token budget:** `kGemmaMaxTokens=2048`. Không hardcode budget cũ 8000. Xem ratios trong `architecture.md §13`.
+- **Token budget:** Mặc định `kGemmaMaxTokens=2048`. Thực tế được detect từ thiết bị: high=4096, medium=2048, low=1024. Lưu trong `DeviceCapabilityHolder.contextWindow`.
 - **Dynamic Budget (v3):** Budget được phân bổ động theo **8** `QueryType`: conversational, factual, complex, creative, summarization, translation, mathCoding, multiHop. Hỗ trợ song ngữ Việt-Anh. Session init dùng `kSessionInitHistoryRatio=0.35` riêng. File: `lib/core/constants/budget_allocation.dart`.
 - **chunkSize runtime:** `200`, `overlap=50` — set trong `DocumentUploadQueue`, không phải `ChunkingService` default.
 - **estimateTokens:** `chars / 2.5` — single source of truth cho mọi nơi (RAG packing, PromptBuilder, chunk logging).
@@ -107,6 +111,7 @@
 - **PromptBuilder 2 methods:** `buildSystemInstruction()` → cho `createSession()`. `buildTurnPayload()` → cho `generateWithSession()`. KHÔNG dùng `build()` cũ cho chat turns (chỉ dùng cho SummaryService legacy).
 - **Turn payload size:** RAG + question ≈ ~300-800 chars (thay vì ~2500-3300 chars trước đây). Giảm áp lực GPU.
 - **Hybrid Search Fallback:** Nếu BM25 không tìm thấy kết quả, tự động fallback về dense search. Nếu cả 2 rỗng → skip RAG.
+- **DeviceCapability:** Detect device tier từ physical RAM (Android) hoặc model name (iOS). Chạy 1 lần ở `main()`.
 - **`_recreateSession()`:** Fallback khi session bị mất giữa chừng (hiếm). Tạo session mới + replay history.
 
 ---
@@ -125,8 +130,6 @@
 |--------|---------|
 | GPU crash rate (tested) | **~0%** (0 crash / 2 queries + 4 file uploads) ✅ |
 | Cold start (bao gồm model init) | ~13 giây |
+| Device tiers | high=4096, medium=2048, low=1024 |
 
-⚠️ GPU crash khi prompt có RAG chunks — đã giảm thiểu nhờ turn payload giảm + dynamic budget, nhưng vẫn cần theo dõi thêm.
-
-</file_content>
-</write_to_file>
+⚠️ GPU crash khi prompt có RAG chunks — đã giảm thiểu nhờ turn payload giảm + dynamic budget + device-aware context window, nhưng vẫn cần theo dõi thêm.

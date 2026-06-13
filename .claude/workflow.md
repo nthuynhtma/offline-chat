@@ -29,15 +29,26 @@
 ```
 main()
   │
-  ├─ FlutterGemma.initialize()            // Load native libs
+  ├─ WidgetsFlutterBinding.ensureInitialized()
+  ├─ SystemChrome.setPreferredOrientations([portraitUp])
+  ├─ Global error handlers (FlutterError + PlatformDispatcher)
   │
+  ├─ [NEW] DEVICE CAPABILITY DETECTION
+  │    └─ DeviceCapability.detectTier()
+  │         ├─ Android: physicalRamSize (MB) → convert GB
+  │         ├─ iOS: infer từ model name (iPhone15,2+ = high...)
+  │         └─ Lưu contextWindow vào DeviceCapabilityHolder
+  │              high (≥8GB)=4096, medium (6GB)=2048, low (≤4GB)=1024
+  │    Log: 📱 [Device] Tier: X, contextWindow: Y
+  │
+  ├─ FlutterGemma.initialize()            // Load native libs
   ├─ setupLocator()                       // DI Registration
   │    │
   │    ├─ AppDatabase                     // SQLite drift
   │    ├─ ModelManagerService             // Download/load models
   │    ├─ GemmaService                    // LLM wrapper
   │    ├─ GeckoService → GeckoRetryService
-  │    ├─ Bm25Service → Bm25ServiceImpl    // [NEW] FTS5 search
+  │    ├─ Bm25Service → Bm25ServiceImpl    // FTS5 search
   │    ├─ VectorStoreService              // Cosine similarity
   │    ├─ RagService → RagServiceImpl     // Hybrid search
   │    ├─ PromptBuilder → PromptBuilderImpl
@@ -45,6 +56,10 @@ main()
   │    ├─ MemoryStoreService              // User memory
   │    ├─ DocumentUploadQueue             // File processing pipeline
   │    └─ Blocs: ModelBloc, SessionBloc, ChatBloc, KnowledgeBloc
+  │         └─ ChatBloc nhận contextWindow động từ DeviceCapabilityHolder
+  │
+  ├─ [NEW] GemmaService.initialize(maxTokens: contextWindow)
+  │    └─ maxTokens = DeviceCapabilityHolder.contextWindow (1024/2048/4096)
   │
   └─ runApp(App())
        │
