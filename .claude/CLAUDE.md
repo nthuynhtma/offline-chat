@@ -6,7 +6,7 @@
 **Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai. Attached Files + Knowledge Scope + RAG completed-only filter đã triển khai.
 
 **13/06/2026 (Evening):** Hoàn thành **2/5 giải pháp tối ưu**:
-- ✅ **Solution 1: Dynamic Budget Allocation** (`VERSION=dynamic_budget_v1`) — Phân bổ context budget động theo loại câu hỏi (conversational/factual/complex). Query classification bằng heuristics, không dùng model. Session init giữ 35% history riêng.
+- ✅ **Solution 1: Dynamic Budget Allocation** (`VERSION=dynamic_budget_v3`) — Phân bổ context budget động theo **8 loại câu hỏi** (conversational/factual/complex/creative/summarization/translation/mathCoding/multiHop). Hỗ trợ song ngữ Việt-Anh. Query classification bằng heuristics (không dùng model). Session init giữ 35% history riêng.
 - ✅ **Solution 2: Hybrid Search BM25** (`VERSION=hybrid_v1`) — Kết hợp dense search (Gecko) + sparse search (BM25 FTS5) + Reciprocal Rank Fusion. Graceful degradation fallback nếu 1 trong 2 nguồn rỗng. topK tăng 20→50.
 - ⏸️ **Solution 3: Query Rewriting** — DEFER P2 (lý do: `generate()` destroys active session, TTFT +100%, redundant với hybrid search)
 - ⬜ **Solution 4: Contextual Chunking** — Chưa implement
@@ -87,9 +87,9 @@
 | `rag_service_impl.dart` | `VERSION=try_fit_v2` | Verify RAG packing code đang chạy | 12/06/2026 |
 | `rag_service_impl.dart` | `VERSION=hybrid_v1` | Verify hybrid search (dense+sparse+RRF) đang chạy | 13/06/2026 |
 | `prompt_builder_service.dart` | `VERSION=session_api_v1` | Verify PromptBuilder code mới (buildSystemInstruction + buildTurnPayload) | 13/06/2026 |
-| `budget_allocation.dart` | `VERSION=dynamic_budget_v1` | Verify Dynamic Budget Allocation code đang chạy | 13/06/2026 |
+| `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Verify Dynamic Budget Allocation code đang chạy (8 query types) | 13/06/2026 |
 | `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation đang chạy | 13/06/2026 |
-| `chat_bloc.dart` | `VERSION=dynamic_budget_v1` (log) | Verify budget phân bổ động trong log | 13/06/2026 |
+| `chat_bloc.dart` | `VERSION=dynamic_budget_v3` (log) | Verify budget phân bổ động trong log | 13/06/2026 |
 
 ---
 
@@ -98,7 +98,7 @@
 - **LiteRT LM:** Chỉ support **1 session tại 1 thời điểm**. Legacy `generate()` / `generateStream()` invalidates session → luôn kiểm tra `hasActiveSession` trước khi gọi `generateWithSession()` (guard tại `chat_bloc.dart:389`).
 - **`GemmaService.generate()` DESTROYS active session** — KHÔNG dùng cho query rewriting hoặc bất kỳ mục đích nào khi đang chat. Nếu cần generate tạm, dùng `createSession()` + `generateWithSession()` + `closeSession()` riêng.
 - **Token budget:** `kGemmaMaxTokens=2048`. Không hardcode budget cũ 8000. Xem ratios trong `architecture.md §13`.
-- **Dynamic Budget:** Budget được phân bổ động theo `QueryType` (conversational/factual/complex). Session init dùng `kSessionInitHistoryRatio=0.35` riêng.
+- **Dynamic Budget (v3):** Budget được phân bổ động theo **8** `QueryType`: conversational, factual, complex, creative, summarization, translation, mathCoding, multiHop. Hỗ trợ song ngữ Việt-Anh. Session init dùng `kSessionInitHistoryRatio=0.35` riêng. File: `lib/core/constants/budget_allocation.dart`.
 - **chunkSize runtime:** `200`, `overlap=50` — set trong `DocumentUploadQueue`, không phải `ChunkingService` default.
 - **estimateTokens:** `chars / 2.5` — single source of truth cho mọi nơi (RAG packing, PromptBuilder, chunk logging).
 - **RAG filter:** Chỉ lấy `status=completed`. Documents đang indexing không được đưa vào RAG.

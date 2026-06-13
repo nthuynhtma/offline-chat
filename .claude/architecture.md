@@ -512,26 +512,37 @@ kSessionInitHistoryRatio = 0.35 (dùng cho session init)
 KHÔNG dùng hardcode totalBudget=8000 cũ.
 ```
 
-### Dynamic Budget Allocation (NEW 13/06/2026)
+### Dynamic Budget Allocation (NEW 13/06/2026 — VERSION=dynamic_budget_v3)
 ```
 File: lib/core/constants/budget_allocation.dart
 
-Query classification (heuristics, không dùng model):
-  - conversational: greeting, câu <15 ký tự, "bạn là ai"
-  - factual: thông tin cụ thể (default)
-  - complex: "phân tích", "tại sao", "như thế nào"
+Query classification (heuristics, song ngữ Việt-Anh, 8 types):
+  Thứ tự ưu tiên:
+    1. translation: "dịch sang", "translate to", "chuyển sang tiếng"
+    2. summarization: "tóm tắt", "rút gọn", "summary", "summarize"
+    3. conversational (greeting): regex ^(hi|hello|chào), "bạn là ai"
+    4. creative: "viết một", "write a story", "hãy kể", "sáng tác"
+    5. mathCoding: "giải phương trình", "implement", "algorithm"
+    6. complex: "phân tích", "tại sao", "explain in detail"
+       (dùng cụm từ trước, từ đơn sau — KHÔNG match từ "phân" đơn lẻ)
+    7. multiHop: "so sánh A và B", "difference between", "relationship"
+    8. conversational (short): length < 15 ký tự
+    9. factual: default (mọi thứ còn lại)
 
-Budget ratios theo query type:
+Budget ratios theo query type (2048 tokens):
 
-| Type | System | Memory | History | RAG | Response | Total |
-|------|--------|--------|---------|-----|----------|-------|
-| conversational | 10% | 5% | 45% | 15% | 25% | 100% |
-| factual | 5% | 2% | 10% | 58% | 25% | 100% |
-| complex | 5% | 5% | 20% | 45% | 25% | 100% |
+| Type | System | Memory | History | RAG | Response | Total | Ghi chú |
+|------|--------|--------|---------|-----|----------|-------|---------|
+| conversational | 10% | 5% | 45% | 15% | 25% | 100% | Nhiều history |
+| factual | 5% | 2% | 10% | 58% | 25% | 100% | Nhiều RAG |
+| complex | 5% | 5% | 20% | 45% | 25% | 100% | Cân bằng |
+| creative | 10% | 5% | 25% | 10% | 50% | 100% | Response lớn |
+| summarization | 2% | 3% | 5% | 70% | 20% | 100% | RAG rất nhiều |
+| translation | 5% | 5% | 30% | 10% | 50% | 100% | History + response |
+| mathCoding | 5% | 5% | 10% | 50% | 30% | 100% | RAG + response |
+| multiHop | 5% | 5% | 25% | 40% | 25% | 100% | RAG + history |
 
 Session init luôn dùng kSessionInitHistoryRatio=0.35 (không dynamic).
-
-VERSION=dynamic_budget_v1
 ```
 
 ---
@@ -574,7 +585,7 @@ Delete Session → Sessions ON DELETE CASCADE
 | `rag_service_impl.dart` | `VERSION=try_fit_v2` | Verify RAG packing code đang chạy | 12/06/2026 |
 | `rag_service_impl.dart` | `VERSION=hybrid_v1` | Verify hybrid search (dense+sparse+RRF) đang chạy | **13/06/2026** |
 | `prompt_builder_service.dart` | `VERSION=session_api_v1` | Verify PromptBuilder code mới | 13/06/2026 |
-| `budget_allocation.dart` | `VERSION=dynamic_budget_v1` | Verify Dynamic Budget Allocation | **13/06/2026** |
+| `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Verify Dynamic Budget Allocation (8 types) | **13/06/2026** |
 | `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation | **13/06/2026** |
 
 ---

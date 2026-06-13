@@ -87,36 +87,45 @@ main()
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 3. DYNAMIC BUDGET ALLOCATION  [VERSION=dynamic_budget_v1]                      │
+│ 3. DYNAMIC BUDGET ALLOCATION  [VERSION=dynamic_budget_v3]                      │
 │                                                                                 │
 │    ContextBudget.forQuery("cách phòng trừ sâu bệnh")                            │
 │      │                                                                          │
 │      ├─ "cách phòng trừ sâu bệnh" → _classifyQuery()                           │
 │      │                                                                          │
-│      │  Query Classification (heuristics, không dùng model):                    │
+│      │  Query Classification (heuristics, 8 types, song ngữ Việt-Anh):          │
 │      │  ┌──────────────────────────────────────────────────────────────────┐    │
-│      │  │ regex: ^(hi|hello|chào) → greeting → conversational             │    │
-│      │  │ chứa: "bạn là ai", "giúp gì" → capability → conversational      │    │
-│      │  │ length < 15 ký tự → conversational                               │    │
-│      │  │ chứa: "phân tích", "tại sao" → complex                           │    │
-│      │  │ default → factual                                                │    │
+│      │  │ 1. translation: "dịch sang", "translate to"                      │    │
+│      │  │ 2. summarization: "tóm tắt", "summary", "summarize"             │    │
+│      │  │ 3. conversational: greeting regex, "bạn là ai", "who are you"   │    │
+│      │  │ 4. creative: "viết một", "write a story", "hãy kể"              │    │
+│      │  │ 5. mathCoding: "giải phương trình", "implement", "algorithm"    │    │
+│      │  │ 6. complex: "phân tích", "tại sao", "explain in detail"         │    │
+│      │  │ 7. multiHop: "so sánh A và B", "difference between"             │    │
+│      │  │ 8. conversational (short): length < 15 ký tự                     │    │
+│      │  │ 9. factual (default): mọi thứ còn lại                           │    │
 │      │  └──────────────────────────────────────────────────────────────────┘    │
 │      │                                                                          │
 │      └─ Kết quả: QueryType.factual                                             │
 │                                                                                 │
-│    Budget Allocation (2048 tokens):                                             │
-│    ┌──────────────┬────────┬────────┬─────────┬──────┬──────────┬───────┐      │
-│    │ Query Type   │ System │ Memory │ History │ RAG  │ Response │ Total │      │
-│    ├──────────────┼────────┼────────┼─────────┼──────┼──────────┼───────┤      │
-│    │ conversational│ 205    │ 102    │ 922     │ 307  │ 512      │ 2048  │      │
-│    │ factual      │ 102    │ 41     │ 205     │ 1188 │ 512      │ 2048  │      │
-│    │ complex      │ 102    │ 102    │ 410     │ 922  │ 512      │ 2048  │      │
-│    └──────────────┴────────┴────────┴─────────┴──────┴──────────┴───────┘      │
+│    Budget Allocation (2048 tokens) — 8 query types:                             │
+│    ┌────────────────┬────────┬────────┬─────────┬────────┬──────────┬───────┐  │
+│    │ Query Type     │ System │ Memory │ History │  RAG   │ Response │ Total │  │
+│    ├────────────────┼────────┼────────┼─────────┼────────┼──────────┼───────┤  │
+│    │ conversational │  10%   │   5%   │   45%   │  15%   │   25%    │ 100%  │  │
+│    │ factual        │   5%   │   2%   │   10%   │  58%   │   25%    │ 100%  │  │
+│    │ complex        │   5%   │   5%   │   20%   │  45%   │   25%    │ 100%  │  │
+│    │ creative       │  10%   │   5%   │   25%   │  10%   │   50%    │ 100%  │  │
+│    │ summarization  │   2%   │   3%   │    5%   │  70%   │   20%    │ 100%  │  │
+│    │ translation    │   5%   │   5%   │   30%   │  10%   │   50%    │ 100%  │  │
+│    │ mathCoding     │   5%   │   5%   │   10%   │  50%   │   30%    │ 100%  │  │
+│    │ multiHop       │   5%   │   5%   │   25%   │  40%   │   25%    │ 100%  │  │
+│    └────────────────┴────────┴────────┴─────────┴────────┴──────────┴───────┘  │
 │                                                                                 │
 │    questionTokens = 10 (ước lượng)                                              │
 │    ragBudget = 1188 - 10 = 1178 tokens                                          │
 │                                                                                 │
-│    Log: 📊 [Budget] VERSION=dynamic_budget_v1                                   │
+│    Log: 📊 [Budget] VERSION=dynamic_budget_v3                                   │
 │         queryType=factual, actualHistory=15/205, rag=1178/1188                  │
 └───────────────────────────┬─────────────────────────────────────────────────────┘
                             │
