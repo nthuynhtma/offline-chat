@@ -7,8 +7,8 @@ Flutter App
 │
 ├── Presentation Layer  (Widgets, Pages)
 ├── Bloc Layer          (Business Logic + State Management)
-├── Service Layer       (AI, RAG, Parsing, VectorStore, Memory, BM25)
-└── Data Layer          (Drift/SQLite — DAOs, Tables)
+├── Service Layer       (AI, RAG, Parsing, VectorStore, Memory, BM25, ModelManager)
+└── Data Layer          (Drift/SQLite — DAOs, Tables + SharedPreferences)
 ```
 
 Áp dụng **Clean Architecture** kết hợp **Feature-first** folder structure.
@@ -34,7 +34,9 @@ main()
   │         high (≥8GB)=4096, medium (6GB)=2048, low (≤4GB)=1024
   ├── FlutterGemma.initialize()
   ├── await setupLocator()           // DI registration (GetIt)
-  ├── [NEW] sl<GemmaService>().initialize(maxTokens: contextWindow)
+  ├── [UPDATED] sl<GemmaService>().initialize(maxTokens: contextWindow)
+  │     └── Graceful: nếu chưa có model, không crash — chỉ log + _model = null
+  │         ModelBloc sẽ init sau khi model được download.
   └── runApp(const App())
 ```
 
@@ -74,11 +76,18 @@ main()
 | `DocumentUploadQueue` | LazySingleton | DocsDao, ChunksDao, Parser, Chunker, Gecko, VectorStore, **Bm25Service** |
 | `DocumentRepository` | LazySingleton | AppDatabase, DocumentUploadQueue |
 
-**Utils (NEW):**
+**Utils:**
 | Component | Scope | Mục đích |
 |-----------|-------|----------|
 | `DeviceCapability` | Static class | Detect device tier, tính contextWindow động |
 | `DeviceCapabilityHolder` | Static class (model_constants.dart) | Lưu contextWindow runtime |
+
+**Model Registry (NEW):**
+| Component | File | Mục đích |
+|-----------|------|----------|
+| `AvailableModelInfo` | `model_constants.dart` | Danh sách LLM models có sẵn (Qwen2.5 + Gemma) |
+| `kAvailableLlmModels` | `model_constants.dart` | Const list các model có thể tải |
+| `ModelType` enum | `model_manager_service.dart` | `llm` / `embedding` |
 
 ---
 
@@ -91,8 +100,8 @@ app.dart — _AppState
   │    ├── /            → SessionListPage
   │    ├── /chat/:id    → ChatPage(sessionId)  [BlocProvider<ChatBloc>(key)]
   │    ├── /knowledge   → KnowledgePage
-  │    ├── /settings    → SettingsPage
-  │    └── /settings/models → ModelManagerPage
+  │    ├── /settings    → SettingsPage (updated: model selector + available models)
+  │    └── /settings/models → ModelManagerPage (dynamic LLM list + radio active)
   └── ValueListenableBuilder<ThemeMode> (themeModeNotifier)
        └── MaterialApp.router
             ├── builder: (context, child) → ModelOnboardingCoordinator(navigatorKey, child)
@@ -153,44 +162,32 @@ ChatBloc({
 })
 ```
 
-### SendMessage Full Flow (Session API + Dynamic Budget, updated 13/06/2026)
+### SendMessage Full Flow (Session API + Dynamic Budget, updated 14/06/2026)
 ```
 1. Guard checks: isClosed? _currentSessionId? is ChatStreaming? _isWaitingForModel?
-2. If gemma not ready: subscribe ModelBloc, _isWaitingForModel=true, return
+2. If gemma not ready:
+      → ModelLoaded: kiểm tra active model đã download chưa (modelState.llmModels + activeLlmFileName)
+      → Nếu đã download nhưng chưa ready: subscribe ModelBloc, _isWaitingForModel=true
+      → Nếu chưa download: emit ChatError(needsModelDownload=true)
 3. Save user message → DB → emit ChatThinking
 4. [NEW] Dynamic Budget: ContextBudget.forQuery(content) → phân bổ tokens
-   - conversational: history 45% (922), rag 15% (307)
-   - factual: history 10% (205), rag 58% (1188)
-   - complex: history 20% (410), rag 45% (922)
-   (context window lấy từ DeviceCapabilityHolder.contextWindow)
 5. RAG retrieval → RagService.retrieve(query, tokenBudget, scope, sessionId)
-   - [NEW] Hybrid search: Dense (Gecko) + Sparse (BM25) + RRF fusion
 6. Build turn payload → PromptBuilder.buildTurnPayload(question, ragContext)
-   (KHÔNG chứa system, history — chỉ RAG + question, ~300-800 chars)
 7. Ensure Gemma session exists (recreate via _recreateSession() if lost)
-   (Session đã tạo ở init, KHÔNG recreate mỗi turn, KHÔNG addHistoryMessage ở đây)
 8. Stream → emit.forEach(gemmaService.generateWithSession(turnPayload))
-   - Each token → emit ChatStreaming
-   - Complete → save assistant msg → emit ChatLoaded
-   - Error → closeSession → emit ChatError
 ```
 
-### Session Initialization Flow (Session API, updated 13/06/2026)
+### Session Initialization Flow (Session API, updated 14/06/2026)
 ```
 SessionInitialized(sessionId)
   ├→ emit ChatLoading
   ├→ load messages từ SQLite
   ├→ hydrate KnowledgeScope từ session DB
+  ├→ Nếu !gemmaService.isReady → skip session creation, load messages only
   ├→ Kiểm tra SessionMemory (summary)
-  │    ├→ Có summary → MemoryPromptFormatter.build(summary, memories)
-  │    │              → createSession(systemInstruction=summarized)
-  │    └→ Không summary → PromptBuilder.buildSystemInstruction(memories)
-  │                       → createSession(systemInstruction)
-  │
+  │    ├→ Có summary → MemoryPromptFormatter.build(summary, memories) → createSession(systemInstruction)
+  │    └→ Không summary → PromptBuilder.buildSystemInstruction(memories) → createSession(systemInstruction)
   ├→ [CHỈ 1 LẦN] Replay history (token-based, 35% context — kSessionInitHistoryRatio)
-  │    → addHistoryMessage(role, content) MỘT LẦN DUY NHẤT
-  │    → KHÔNG addHistoryMessage ở turn tiếp theo
-  │
   └→ emit ChatLoaded
 ```
 
@@ -209,23 +206,8 @@ FIFO _processNext() → _processJob():
   Chunk    0.10 → 0.20    ChunkingService.chunk(rawText, chunkSize=200, overlap=50) → chunks[]
   Embed    0.20 → 0.95    GeckoService.embed(chunk) → vector[768] (per chunk, progressive %)
   Insert   0.95 → 1.00    ChunksCompanion batch → Vectors insert batch
-  [NEW] Index BM25         → Bm25Service.indexChunks() → FTS5 chunks_fts table
+  Index BM25              → Bm25Service.indexChunks() → FTS5 chunks_fts table
   Complete 1.00            status=completed, chunkCount updated
-
-Granular progress stream → SessionFilesPanel + AttachedFilesBar
-  contract.pdf  [████████░░] 82%
-
-Gecko Embedding Guard (defensive):
-  if (!_gecko.isReady) throw UploadQueueException('...')
-  → status=failed, incrementRetryCount
-
-Chunk logging (thêm 12/06/2026):
-  [UploadQueue] Chunks: 4 chunks (chunkSize=200, overlap=50)
-  [UploadQueue] chunk[0] chars=752 tokens=301 preview="..."
-  Dùng estimateTokens() (cùng estimator với RAG/PromptBuilder)
-
-BM25 Indexing log (thêm 13/06/2026):
-  📚 [BM25] Indexed 8 chunks into FTS5
 ```
 
 ---
@@ -235,40 +217,20 @@ BM25 Indexing log (thêm 13/06/2026):
 ```
 RagService.retrieve(query, tokenBudget, scope, sessionId):
   0. Early exit guard: _shouldSkipRag() → RagSkipReason enum
-     - tooShort: ≤2 từ, không ?, <15 ký tự
-     - greeting: hi/hello/chào/xin chào
-     - capability: bạn là ai/giúp gì/what can you do
   1. Embed query → GeckoService.embed(query)
   2. Filter document IDs theo KnowledgeScope (CHỈ status=completed)
-     - attachedOnly: getCompletedDocumentIdsBySessionId + refDocIds
-     - globalOnly: getCompletedGlobalDocumentIds()
-     - attachedAndGlobal: global + session + ref (all completed)
   3. Nếu allowedDocIds rỗng → early return RagContext.empty
-  4. [NEW] Dense search → VectorStoreService.search(topK:50, threshold:0.7, allowedDocIds)
-     (topK tăng từ 20 lên 50 cho hybrid search)
-  5. [NEW] Sparse search → Bm25Service.search(query, allowedDocIds, topK:50)
-     - Sanitize query (remove FTS5 special chars)
-     - BM25 ranking với FTS5 unicode61 tokenizer
-     - Filter kết quả theo allowedDocumentIds
-  6. [NEW] Reciprocal Rank Fusion (RRF, k=60):
-     - Fallback: nếu 1 trong 2 nguồn rỗng → dùng nguồn còn lại
-     - Nếu cả 2 rỗng → skip RAG
-  7. Log candidates: VERSION=hybrid_v1 dense=N sparse=M fused=K
-  8. Try-fit packing (VERSION=try_fit_v2):
-     - Hard caps: kMaxRagChunks=3, kMaxRagTokens=500
-     - effectiveCap = min(tokenBudget, kMaxRagTokens)
-     - continue nếu chunk > effectiveCap
-     - add nếu còn budget (greedy knapsack)
-     - safety guard khi đầy
-  9. Log packing: matched, packed, tokens, cap
-  10. Log RagTelemetry
-
+  4. Dense search → VectorStoreService.search(topK:50, threshold:0.7, allowedDocIds)
+  5. Sparse search → Bm25Service.search(query, allowedDocIds, topK:50)
+  6. Reciprocal Rank Fusion (RRF, k=60) hoặc fallback
+  7. Try-fit packing (VERSION=try_fit_v2)
+  8. Log RagTelemetry
 Return: RagContext(chunks, tokenCount, bestScore)
 ```
 
 ---
 
-## 7. Data Flow — Prompt Building (updated 13/06/2026)
+## 7. Data Flow — Prompt Building (updated 14/06/2026)
 
 PromptBuilder hiện có 2 methods riêng biệt (VERSION=session_api_v1):
 
@@ -286,11 +248,7 @@ CHỈ chứa system + memories + summary. KHÔNG chứa history.
 ```
 CHỈ chứa RAG + question. KHÔNG chứa system/history.
   === Reference Documents === (RAG chunks — nếu có)
-    [Document 1] chunkText
-    [Document 2] chunkText
-
   === Current Question ===
-  user question (KHÔNG turn markers — generateWithSession tự wrap)
 ```
 
 ### Legacy build() (VERSION=dedup_v1)
@@ -306,152 +264,121 @@ API: Session-based (turn-based chat)
   createSession(systemInstruction?) → addHistoryMessage(role, content)
   → generateWithSession(userMessage) → Stream<String>
 
-maxTokens: [NEW] Detect từ device (4096/2048/1024)
+maxTokens: Detect từ device (4096/2048/1024)
   Khởi tạo trong main(): sl<GemmaService>().initialize(maxTokens: contextWindow)
-  Runtime lấy từ DeviceCapabilityHolder.contextWindow
+  Graceful: nếu chưa có model, không crash — chỉ log + _model = null
 
 Backend: PreferredBackend.gpu (CPU fallback đang debug)
 Timeout: 120s
 
+switchModel() [NEW 14/06/2026]:
+  Dispose old model → FlutterGemma.installModel() → FlutterGemma.getActiveModel()
+  Dùng khi user chọn model khác trong ModelManagerPage
+
 Legacy API (dùng bởi SummaryService):
   generateStream(prompt) — tạo session mới mỗi lần
   generate(prompt) — tương tự, Future<String>
+```
 
-⚠️ LiteRT LM constraint: Chỉ support 1 session tại 1 thời điểm.
-  Legacy generate() invalidates session → hasActiveSession guard ở ChatBloc.
-  generate()/generateStream() set _session=null trước createSession().
-  ⚠️ KHÔNG dùng generate() cho query rewriting — destroys active session.
+### ModelManagerService (mở rộng 14/06/2026)
+```
+Multi-model support:
+  allLlmModels → List<ModelInfo> (từ kAvailableLlmModels registry)
+  activeLlmFileName → String (persist qua SharedPreferences)
+  downloadModel(fileName) → Generic download
+  deleteModel(fileName) → Xoá file + reset status
+  setActiveLlmModel(fileName) → Persist + update
 
-P0 Logging (12/06/2026):
-  generateWithSession: sessionActive, promptLength, maxTokens, sessionHash
-  prompt head (500 chars), prompt tail (500 chars)
-  token[1..20] (first 20 tokens)
-  response preview (200 chars), total tokens
-  error log + closeSession
+ModelType enum: llm, embedding
+ModelInfo.modelType: phân biệt LLM vs embedding models
+```
+
+### ModelBloc (mở rộng 14/06/2026)
+```
+State: ModelLoaded(llmModels, geckoInfo, gemmaReady, geckoReady, activeLlmFileName)
+Events mới:
+  ModelDownloadRequested(fileName) → Tải model bất kỳ
+  ActiveModelChanged(fileName) → Lưu + switch model (nếu đã download)
+  ModelDeleted(fileName) → Xoá file + fallback về default nếu active
 ```
 
 ### GeckoService (flutter_gemma EmbeddingModel)
 ```
 registerModel(modelPath, tokenizerPath) → initialize()
   → embed(text) → List<double> (768-dim)
-
-TaskType.retrievalQuery cho query
-TaskType.retrievalDocument cho indexing
-
-FIFO lock: _runLocked<T>(fn) — Completer-based, tránh race GPU/FFI
-
-⚠️ Gecko_256_quant suspicion (12/06/2026):
-  Score ranking barely changes across different Vietnamese queries.
-  chunk[0] (giới thiệu chung) always top 1.
-  Đã giảm thiểu nhờ Hybrid Search BM25 (13/06/2026).
 ```
 
 ### VectorStoreService (SQLite Cosine Search)
 ```
 Lưu vector dạng Float32List serialize → BLOB
 Search: brute-force cosine similarity
-Đủ dùng cho < 50,000 chunks
-
-2-step search:
-  1. Filter candidates bằng allowedDocumentIds
-  2. Pre-topK (200) → cosine similarity → re-rank → topK (50 cho hybrid search)
 ```
 
-### Bm25Service (SQLite FTS5 — NEW 13/06/2026)
+### Bm25Service (SQLite FTS5)
 ```
-Interface:
-  search(query, allowedDocumentIds, topK) → List<SearchResult>
-  indexChunk(chunkId, documentId, chunkText) → void
-  indexChunks(chunks) → void
-  deleteByChunkIds(chunkIds) → void
-
-Implementation: Bm25ServiceImpl
-  Database: SQLite FTS5 virtual table (chunks_fts)
-  Tokenizer: unicode61 (hỗ trợ tiếng Việt Unicode)
-  Ranking: BM25 (hàm bm25() built-in của SQLite)
-  Query sanitize: remove FTS5 special chars ( ) * ^ " ~ : +
-  Phrase search: wrap multi-word queries trong double quotes
-
-  VERSION=bm25_v1
+SQLite FTS5 virtual table (chunks_fts)
+Tokenizer: unicode61 (hỗ trợ tiếng Việt Unicode)
+Ranking: BM25
 ```
 
-### DeviceCapability (NEW 13/06/2026)
+### DeviceCapability
 ```
 File: lib/core/utils/device_capability.dart
-
-DeviceTier enum: { high, medium, low }
-
-DeviceCapability.detectTier() → Future<DeviceTier>
-  Android: deviceInfo.androidInfo.physicalRamSize (MB) / 1024 → GB
-  iOS: infer từ iosInfo.utsname.machine
-    iPhone15,2+ / iPhone16 = high (8GB+)
-    iPhone13-14 = medium (6GB)
-    iPhone SE/older = low (3-4GB)
-  Fallback: medium (nếu không detect được)
-
-DeviceCapability.getContextWindowForTier(tier) → int
-  high: 4096, medium: 2048, low: 1024
-
-DeviceCapabilityHolder (trong model_constants.dart):
-  static int contextWindow = kGemmaMaxTokens  // Mặc định 2048
-  Được set trong main() trước setupLocator
-  Dùng bởi: ChatBloc, GemmaService, MemoryBudgetConfig, BudgetAllocation
+DeviceTier: { high, medium, low }
+  high (≥8GB)=4096, medium (6GB)=2048, low (≤4GB)=1024
 ```
 
 ### ChunkingService
 ```
 Interface: chunk(text, {chunkSize=500, overlap=100}) → List<String>
-Runtime default: chunkSize=200, overlap=50 (set trong DocumentUploadQueue)
-
-charsPerToken = 4 (chunker) vs 2.5 (estimator)
-Cố gắng cắt tại word boundary (space)
+Runtime default: chunkSize=200, overlap=50
 ```
 
 ### MemoryStoreService + SummaryService — Auto Summary
 ```
 Kiến trúc:
   Gemma Session → Recent Messages (15%) → Summary (8%) → User Memories (2%) → RAG Documents
-
-Database tables:
-  SessionMemory: sessionId, summary, summaryVersion, msgCount, estTokens, runningTokenCount, updatedAt
-  UserMemory: namespace, key, value (composite PK)
-
-MemoryBudgetConfig (dynamic theo context window):
-  responseReserve:    25%
-  systemBudget:        5%
-  summaryBudget:       8% (clamp 100-500)
-  userMemoryBudget:    2%
-  recentConversation: 15%
-  summaryTrigger:     available * 0.65
-```
-
-### PromptBuilder (VERSION=session_api_v1, updated 13/06/2026)
-```
-2 methods riêng biệt:
-  buildSystemInstruction({sessionSummary?, userMemories?})
-    → System prompt + memories + summary (có <start_of_turn>system<end_of_turn>)
-    → Dùng cho createSession()
-    → KHÔNG chứa history
-
-  buildTurnPayload({question, ragContext})
-    → RAG context + question (KHÔNG turn markers)
-    → Dùng cho generateWithSession()
-    → KHÔNG chứa system/history
-
-Method cũ build() (VERSION=dedup_v1) giữ cho SummaryService legacy.
-```
-
-### DocumentUploadQueue — FIFO Pipeline
-```
-chunkSize=200, overlap=50 (runtime default 12/06/2026)
-Gecko Embedding Guard: throw UploadQueueException nếu Gecko chưa ready
-Chunk logging: chars, tokens (estimateTokens), preview (safe substring min 60)
-[NEW 13/06/2026] BM25 indexing: sau khi insert chunks/vectors, index vào FTS5
 ```
 
 ---
 
-## 9. Error Handling
+## 9. Model Management (NEW 14/06/2026)
+
+### Model Registry
+```dart
+// lib/core/constants/model_constants.dart
+const List<AvailableModelInfo> kAvailableLlmModels = [
+  AvailableModelInfo(
+    name: 'Qwen2.5-1.5B Instruct (mặc định)',
+    fileName: 'Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm',
+    downloadUrl: 'https://huggingface.co/...',
+    fileSizeBytes: 1597931520,  // 1.49 GB
+  ),
+  AvailableModelInfo(
+    name: 'Gemma 4E2B IT',
+    fileName: 'gemma-4-E2B-it.litertlm',
+    downloadUrl: '...',
+    fileSizeBytes: 2588147712,  // 2.59 GB
+  ),
+];
+```
+
+### User-facing UI
+| Page | Action |
+|------|--------|
+| **SettingsPage** | Default model dropdown + Available models list + download |
+| **ModelManagerPage** | Full management: download, activate (radio), delete LLM models + Gecko status |
+| **ModelOnboardingCoordinator** | Tự động show dialog khi lần đầu mở app (Qwen2.5 + Gecko) |
+
+### Persistent State
+| Key | Storage | Giá trị |
+|-----|---------|---------|
+| `active_llm_model` | SharedPreferences | File name của model đang active |
+| `hasSeenModelOnboarding` | SharedPreferences | Đã show onboarding dialog chưa |
+
+---
+
+## 10. Error Handling
 
 ```
 AppException (base)
@@ -464,60 +391,24 @@ AppException (base)
 └── UploadQueueException (mới)     → Gecko chưa ready, file upload fail
 
 Runtime errors (non-AppException):
-  Bad state: Session is closed → FFI session invalidated by legacy generate()
-    → Guarded bởi hasActiveSession check tại ChatBloc dòng 389
+  GemmaService.initialize() fail → graceful: log + _model = null
+  GemmaService.switchModel() fail → ModelNotLoadedException
+  Bad state: Session is closed → Guarded bởi hasActiveSession check tại ChatBloc
   BM25 search error → graceful degradation, fallback về dense search
   DeviceCapability detect error → fallback medium (2048 tokens)
 ```
 
 ---
 
-## 10. Chat UI Architecture
+## 11. Chat UI Architecture
 
 ```
-ChatPage (167 dòng, refactored 11/06/2026)
+ChatPage
   └── AppBar (ScopeSelector + ClearButton)
   └── Column
-       ├── ModelNotInstalledBanner (BlocBuilder riêng)
+       ├── ModelNotInstalledBanner (BlocBuilder, kiểm tra llmModels của ModelLoaded)
        ├── ChatBody (BlocBuilder)
-       │    └── MessageList (ScrollController + ListViewObserver)
-       │         ├── MessageBubble (MarkdownBody cho AI)
-       │         └── LastBubble (BlocBuilder riêng, buildWhen: streamingText)
-       │              ├── ChatThinking → ThinkingBubble (3 chấm)
-       │              └── ChatStreaming → MessageBubble(isStreaming: true)
        └── AttachedFilesBar + ChatInputBar
-
-Widgets tách riêng (11 files):
-  model_not_installed_banner, scope_selector, clear_button, chat_body,
-  error_banner, message_list, scroll_to_bottom_button, last_bubble,
-  thinking_bubble, attached_files_bar, chat_input_bar
-```
-
-### Auto-scroll
-```
-_isNearBottom: ListViewObserver.onObserve
-_scrollToBottom(): lần đầu vào chat, message mới, streaming (nếu _isNearBottom)
-```
-
----
-
-## 11. Model Onboarding Coordinator
-
-```
-ModelOnboardingCoordinator (StatefulWidget) — App level
-  BlocListener<ModelBloc>: show confirm dialog khi model chưa download
-  listenWhen: !_promptCompleted && !_isDialogVisible && !_hasSeenOnboarding
-             && curr is ModelLoaded && gemmaInfo.status == notDownloaded
-
-Flow:
-  1. Confirm dialog → "Gemma (2.6GB) + Gecko (111MB)"
-  2. Dispatch cả GemmaDownloadStarted + GeckoDownloadStarted (song song)
-  3. Progress dialog (2 progress bars)
-  4. Hoàn tất → SnackBar "Model AI đã sẵn sàng!"
-  5. Lỗi → [Để sau] / [Thử lại]
-
-SharedPreferences: hasSeenModelOnboarding (set true khi dialog hiển thị)
-Navigator: Dùng GlobalKey<NavigatorState> truyền từ App
 ```
 
 ---
@@ -526,15 +417,8 @@ Navigator: Dùng GlobalKey<NavigatorState> truyền từ App
 
 ```
 File: lib/core/utils/token_estimator.dart
-
 estimateTokens(text): chars / 2.5 (heuristic cho tiếng Việt)
 estimateMessageTokens(text): estimateTokens(text) + 5 (role overhead)
-
-Dùng bởi:
-  - RAG packing (try-fit)
-  - PromptBuilder history truncation
-  - Context Budget calculation (static + dynamic)
-  - UploadQueue chunk logging
 ```
 
 ---
@@ -547,108 +431,75 @@ kGemmaMaxTokens = 2048 (mặc định)
 kHistoryBudgetRatio  = 0.35 (≈717 tok)
 kResponseBudgetRatio = 0.25 (≈512 tok)
 kSystemBudgetRatio   = 0.10 (≈205 tok)
-kSessionInitHistoryRatio = 0.35 (dùng cho session init)
-
-KHÔNG dùng hardcode totalBudget=8000 cũ.
+kSessionInitHistoryRatio = 0.35
 ```
 
-### Dynamic Budget Allocation (NEW 13/06/2026 — VERSION=dynamic_budget_v3)
+### Dynamic Budget Allocation (VERSION=dynamic_budget_v3)
 ```
-File: lib/core/constants/budget_allocation.dart
-
-Query classification (heuristics, song ngữ Việt-Anh, 8 types):
-  Thứ tự ưu tiên:
-    1. translation: "dịch sang", "translate to", "chuyển sang tiếng"
-    2. summarization: "tóm tắt", "rút gọn", "summary", "summarize"
-    3. conversational (greeting): regex ^(hi|hello|chào), "bạn là ai"
-    4. creative: "viết một", "write a story", "hãy kể", "sáng tác"
-    5. mathCoding: "giải phương trình", "implement", "algorithm"
-    6. complex: "phân tích", "tại sao", "explain in detail"
-       (dùng cụm từ trước, từ đơn sau — KHÔNG match từ "phân" đơn lẻ)
-    7. multiHop: "so sánh A và B", "difference between", "relationship"
-    8. conversational (short): length < 15 ký tự
-    9. factual: default (mọi thứ còn lại)
-
-Budget ratios theo query type (tính trên DeviceCapabilityHolder.contextWindow):
-
-| Type | System | Memory | History | RAG | Response | Total | Ghi chú |
-|------|--------|--------|---------|-----|----------|-------|---------|
-| conversational | 10% | 5% | 45% | 15% | 25% | 100% | Nhiều history |
-| factual | 5% | 2% | 10% | 58% | 25% | 100% | Nhiều RAG |
-| complex | 5% | 5% | 20% | 45% | 25% | 100% | Cân bằng |
-| creative | 10% | 5% | 25% | 10% | 50% | 100% | Response lớn |
-| summarization | 2% | 3% | 5% | 70% | 20% | 100% | RAG rất nhiều |
-| translation | 5% | 5% | 30% | 10% | 50% | 100% | History + response |
-| mathCoding | 5% | 5% | 10% | 50% | 30% | 100% | RAG + response |
-| multiHop | 5% | 5% | 25% | 40% | 25% | 100% | RAG + history |
-
-Session init luôn dùng kSessionInitHistoryRatio=0.35 (không dynamic).
+Query classification: 8 types (conversational, factual, complex, creative, summarization, translation, mathCoding, multiHop)
+Budget ratios phân bổ % theo type + context window
+Session init luôn dùng kSessionInitHistoryRatio=0.35
 ```
 
-### DeviceCapability (NEW 13/06/2026)
+### DeviceCapability
 ```
-File: lib/core/utils/device_capability.dart
-
-Detect thiết bị → DeviceTier → contextWindow:
-  ┌────────┬───────────┬──────────────────────────────┐
-  │ Tier   │ RAM       │ contextWindow                │
-  ├────────┼───────────┼──────────────────────────────┤
-  │ high   │ ≥ 8GB     │ 4096 tokens (flagship)       │
-  │ medium │ ~6GB      │ 2048 tokens (mid-range, def) │
-  │ low    │ ≤ 4GB     │ 1024 tokens (giảm crash)     │
-  └────────┴───────────┴──────────────────────────────┘
-
-Holder: DeviceCapabilityHolder.contextWindow (static, set trong main())
-Dùng bởi: ChatBloc, GemmaService.initialize(), BudgetAllocation
+high (≥8GB) = 4096 tokens
+medium (6GB) = 2048 tokens (fallback)
+low (≤4GB) = 1024 tokens
 ```
 
 ---
 
-## 14. Knowledge Management
+## 14. Database Schema Highlights
 
-### KnowledgeScope
-```dart
-enum KnowledgeScope { attachedOnly, globalOnly, attachedAndGlobal }
-```
-Lưu theo conversation, persist qua session.
-
-### RAG Filter (chỉ completed)
-```
-Filter trước ranking, không filter sau topK:
-  attachedOnly: getCompletedDocumentIdsBySessionId + getCompletedDocumentIdsByIds(refDocIds)
-  globalOnly: getCompletedGlobalDocumentIds()
-  attachedAndGlobal: global + session + ref (all completed)
-```
-
-### Ownership-based Delete/Detach
-```
-detachDocument(documentId):
-  if doc.sessionId == sessionId → deleteDocument (cascade chunks + vectors)
-  else → refsDao.detachDocument (chỉ xoá session_document_refs)
-```
-
-### Cascade Delete
-```
-Delete Session → Sessions ON DELETE CASCADE
-  → Documents (sessionId) → Chunks (documentId) → Vectors (xoá thủ công qua DAO)
+```sql
+documents: id TEXT PK, name, path, sizeBytes, mimeType, sessionId TEXT? FK, status INT, ...
+sessions: id TEXT PK, knowledgeScope INT
+session_document_refs: sessionId FK, documentId FK, attachedAt PK
+chunks: id TEXT PK, documentId FK, chunkIndex INT, chunkText TEXT, tokenCount INT
+vectors: id TEXT PK ('v_' + chunkId), chunkId FK, embedding BLOB
+messages: id TEXT PK, sessionId FK, role TEXT, content TEXT, createdAt
+session_memory: sessionId PK FK, summary TEXT, summaryVersion INT, msgCount INT, ...
+user_memory: namespace TEXT, key TEXT, value TEXT, PK: (namespace, key)
+chunks_fts: VIRTUAL TABLE (FTS5) — chunk_id, document_id, chunk_text
 ```
 
 ---
 
-## 15. Version Markers (Runtime Verification)
+## 15. Model Onboarding Coordinator
+
+```
+ModelOnboardingCoordinator (StatefulWidget) — App level
+  BlocListener<ModelBloc>: show confirm dialog khi chưa có LLM model nào download
+  listenWhen: _promptCompleted, _isDialogVisible, _hasSeenOnboarding,
+             curr is ModelLoaded && llmModels all notDownloaded
+
+Flow (updated 14/06/2026):
+  1. Confirm dialog → "Qwen2.5-1.5B (1.5GB) + Gecko (111MB)"
+  2. Dispatch ModelDownloadRequested(activeLlmFileName) + GeckoDownloadStarted
+  3. Progress dialog (2 progress bars) — BlocBuilder
+  4. Hoàn tất → SnackBar "Model AI đã sẵn sàng!"
+  5. Lỗi → [Để sau] / [Thử lại]
+
+SharedPreferences: hasSeenModelOnboarding
+```
+
+---
+
+## 16. Version Markers (Runtime Verification)
 
 | File | Marker | Purpose | Added |
 |------|--------|---------|-------|
 | `rag_service_impl.dart` | `VERSION=try_fit_v2` | Verify RAG packing code đang chạy | 12/06/2026 |
-| `rag_service_impl.dart` | `VERSION=hybrid_v1` | Verify hybrid search (dense+sparse+RRF) đang chạy | **13/06/2026** |
-| `prompt_builder_service.dart` | `VERSION=session_api_v1` | Verify PromptBuilder code mới | 13/06/2026 |
-| `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Verify Dynamic Budget Allocation (8 types) | **13/06/2026** |
-| `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation | **13/06/2026** |
-| `device_capability.dart` | (device log) | 📱 [Device] Tier: X, contextWindow: Y | **13/06/2026** |
+| `rag_service_impl.dart` | `VERSION=hybrid_v1` | Verify hybrid search (dense+sparse+RRF) | 13/06/2026 |
+| `prompt_builder_service.dart` | `VERSION=session_api_v1` | PromptBuilder 2 methods | 13/06/2026 |
+| `budget_allocation.dart` | `VERSION=dynamic_budget_v3` | Dynamic Budget Allocation (8 types) | 13/06/2026 |
+| `bm25_service_impl.dart` | `VERSION=bm25_v1` | BM25 FTS5 implementation | 13/06/2026 |
+| `device_capability.dart` | (device log) | 📱 [Device] Tier: X, contextWindow: Y | 13/06/2026 |
 
 ---
 
-## 16. Performance Observations (thực tế từ runtime, verified 13/06/2026)
+## 17. Performance Observations (Gemma 4-E2B, verified 13/06/2026)
 
 | Metric | Không RAG (34 chars) | Có RAG (313 chars) |
 |--------|---------------------|--------------------|
@@ -668,46 +519,86 @@ Delete Session → Sessions ON DELETE CASCADE
 
 ---
 
-## 17. Database Schema Highlights
+## 18. Core Services Detail
 
-```sql
--- Documents
-documents: id TEXT PK, name, path, sizeBytes, mimeType,
-           sessionId TEXT? FK→sessions, status INT (IndexStatus),
-           progress REAL, errorMessage TEXT?, retryCount INT,
-           lastProcessedAt DATETIME?
+### GeckoService — Chi tiết
+```
+registerModel(modelPath, tokenizerPath) → initialize()
+  → embed(text) → List<double> (768-dim)
 
--- Sessions
-sessions: id TEXT PK, knowledgeScope INT (0/1/2)
+TaskType.retrievalQuery cho query
+TaskType.retrievalDocument cho indexing
 
--- Session Document Refs (junction)
-session_document_refs: sessionId FK, documentId FK, attachedAt
-                       PK: (sessionId, documentId)
+FIFO lock: _runLocked<T>(fn) — Completer-based, tránh race GPU/FFI
 
--- Chunks
-chunks: id TEXT PK, documentId FK, chunkIndex INT,
-        chunkText TEXT, tokenCount INT, createdAt
+⚠️ Gecko_256_quant suspicion (12/06/2026):
+  Score ranking barely changes across different Vietnamese queries.
+  chunk[0] (giới thiệu chung) always top 1.
+  Đã giảm thiểu nhờ Hybrid Search BM25 (13/06/2026).
+```
 
--- Vectors
-vectors: id TEXT PK ('v_' + chunkId), chunkId FK, embedding BLOB, createdAt
+### Bm25Service — Chi tiết
+```
+Implementation: Bm25ServiceImpl
+  Database: SQLite FTS5 virtual table (chunks_fts)
+  Tokenizer: unicode61 (hỗ trợ tiếng Việt Unicode)
+  Ranking: BM25 (hàm bm25() built-in của SQLite)
+  Query sanitize: remove FTS5 special chars ( ) * ^ " ~ : +
+  Phrase search: wrap multi-word queries trong double quotes
+  VERSION=bm25_v1
+```
 
--- Messages
-messages: id TEXT PK, sessionId FK, role TEXT, content TEXT, createdAt
+### VectorStoreService — Chi tiết
+```
+2-step search:
+  1. Filter candidates bằng allowedDocumentIds
+  2. Pre-topK (200) → cosine similarity → re-rank → topK (50 cho hybrid search)
+```
 
--- Session Memory
-session_memory: sessionId PK FK, summary TEXT, summaryVersion INT,
-                msgCount INT, estTokens INT, runningTokenCount INT, updatedAt
+### DocumentUploadQueue — Chi tiết
+```
+chunkSize=200, overlap=50 (runtime default 12/06/2026)
+Gecko Embedding Guard: throw UploadQueueException nếu Gecko chưa ready
 
--- User Memory
-user_memory: namespace TEXT, key TEXT, value TEXT, updatedAt
-             PK: (namespace, key)
+Chunk logging (12/06/2026):
+  [UploadQueue] Chunks: 4 chunks (chunkSize=200, overlap=50)
+  [UploadQueue] chunk[0] chars=752 tokens=301 preview="..."
+  Dùng estimateTokens() (cùng estimator với RAG/PromptBuilder)
 
--- [NEW 13/06/2026] FTS5 Virtual Table for BM25 search
-chunks_fts: VIRTUAL TABLE (FTS5)
-  - chunk_id UNINDEXED TEXT
-  - document_id UNINDEXED TEXT
-  - chunk_text (full-text indexed)
-  - tokenize='unicode61'
-  - Tạo bằng raw SQL trong migration (schemaVersion 5)
-  - KHÔNG có Drift table class (virtual table)
-  - SQL: CREATE VIRTUAL TABLE chunks_fts USING fts5(...)
+BM25 Indexing log (13/06/2026):
+  📚 [BM25] Indexed 8 chunks into FTS5
+```
+
+### MemoryStoreService + SummaryService — Chi tiết
+```
+Kiến trúc:
+  Gemma Session → Recent Messages (15%) → Summary (8%) → User Memories (2%) → RAG Documents
+
+Database tables:
+  SessionMemory: sessionId, summary, summaryVersion, msgCount, estTokens, runningTokenCount, updatedAt
+  UserMemory: namespace, key, value (composite PK)
+
+MemoryBudgetConfig (dynamic theo context window):
+  responseReserve:    25%
+  systemBudget:        5%
+  summaryBudget:       8% (clamp 100-500)
+  userMemoryBudget:    2%
+  recentConversation: 15%
+  summaryTrigger:     available * 0.65
+
+Auto-Summary Trigger:
+  runningTokenCount > availableConversationBudget * 0.65
+  → _runAutoSummary()
+     ├─ incrementalSummarize(oldSummary, newMessages)
+     ├─ saveSessionMemory()
+     └─ extractUserMemory() mỗi 5 lần
+```
+
+---
+
+## 19. Chat UI Architecture — Auto-scroll
+
+```
+_isNearBottom: ListViewObserver.onObserve
+_scrollToBottom(): lần đầu vào chat, message mới, streaming (nếu _isNearBottom)
+```

@@ -1,17 +1,17 @@
 # OfflineChat - AI Agent Guide
 
 ## Mô tả dự án
-Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4-E2B (flutter_gemma ^0.16.4)** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
+Ứng dụng Flutter chat AI chạy **100% offline** trên Android & iOS, sử dụng **Gemma 4-E2B (flutter_gemma ^0.16.4)** hoặc **Qwen2.5-1.5B** làm LLM và **Gecko 110M** làm embedding engine. Hỗ trợ RAG từ PDF/DOCX/TXT, session history, streaming response, context management với token budget.
 
 **Trạng thái hiện tại:** Đã migrate sang **Session-based API** (không còn prompt-based). Auto Summary + Persistent User Memory đã triển khai. Attached Files + Knowledge Scope + RAG completed-only filter đã triển khai.
 
-**13/06/2026 (Evening):** Hoàn thành **2/5 giải pháp tối ưu** + **DeviceCapability**:
-- ✅ **Solution 1: Dynamic Budget Allocation** (`VERSION=dynamic_budget_v3`) — Phân bổ context budget động theo **8 loại câu hỏi** (conversational/factual/complex/creative/summarization/translation/mathCoding/multiHop). Hỗ trợ song ngữ Việt-Anh. Query classification bằng heuristics (không dùng model). Session init giữ 35% history riêng.
-- ✅ **Solution 2: Hybrid Search BM25** (`VERSION=hybrid_v1`) — Kết hợp dense search (Gecko) + sparse search (BM25 FTS5) + Reciprocal Rank Fusion. Graceful degradation fallback nếu 1 trong 2 nguồn rỗng. topK tăng 20→50.
-- ✅ **DeviceCapability** — Tự động detect RAM/thiết bị để điều chỉnh context window: high (≥8GB) = 4096, medium (6GB) = 2048, low (≤4GB) = 1024 tokens.
-- ⏸️ **Solution 3: Query Rewriting** — DEFER P2 (lý do: `generate()` destroys active session, TTFT +100%, redundant với hybrid search)
-- ⬜ **Solution 4: Contextual Chunking** — Chưa implement
-- ⬜ **Solution 5: Multi-Tier Memory** — Chưa implement
+**14/06/2026 (Morning):** Hoàn thành **Full Multi-Model Support**:
+- ✅ **Multi-Model:** Hỗ trợ Qwen2.5-1.5B (mặc định) + Gemma 4E2B. User có thể chọn/tải/xoá model từ Settings hoặc ModelManagerPage.
+- ✅ **switchModel():** `GemmaService.switchModel(path)` — dispose old → install new → init.
+- ✅ **ModelBloc dynamic:** State dùng `List<ModelInfo> llmModels` thay `gemmaInfo` đơn. Events mới: `ModelDownloadRequested`, `ActiveModelChanged`, `ModelDeleted`.
+- ✅ **SettingsPage cleanup:** Xoá dead UI (Cấu hình RAG, Cấu hình Chat). Thêm default model selector + available models list. "Xoá tất cả dữ liệu" và "Đánh chỉ mục lại" implement thật.
+- ✅ **GemmaService graceful init:** `initialize()` không throw khi chưa có model — chỉ log + set `_model = null`. `ModelBloc` sẽ init sau khi download.
+- ✅ **UI overflow fix:** Tên model dài (Qwen2.5) được xử lý với `TextOverflow.ellipsis`.
 
 ---
 
@@ -54,6 +54,69 @@
 
 ---
 
+## Multi-Model Support (NEW 14/06/2026)
+
+### Available LLM Models
+| Model | File | Size | Default |
+|-------|------|------|---------|
+| Qwen2.5-1.5B Instruct | `Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm` | 1.49 GB | **Mặc định** |
+| Gemma 4E2B IT | `gemma-4-E2B-it.litertlm` | 2.59 GB | |
+
+### Model Registry
+**File:** `lib/core/constants/model_constants.dart`
+```dart
+const List<AvailableModelInfo> kAvailableLlmModels = [
+  AvailableModelInfo(name: 'Qwen2.5-1.5B Instruct (mặc định)', ...),
+  AvailableModelInfo(name: 'Gemma 4E2B IT', ...),
+];
+```
+
+### ModelManagerService (mở rộng)
+**File:** `lib/services/model_manager/model_manager_service.dart`
+```dart
+abstract interface class ModelManagerService {
+  List<ModelInfo> get allLlmModels;      // Dynamic list
+  ModelInfo? get activeLlmModel;         // Active model
+  String get activeLlmFileName;          // Persisted in SharedPreferences
+  Future<void> setActiveLlmModel(String fileName);
+  Future<void> downloadModel(String fileName);  // Generic download
+  Future<void> deleteModel(String fileName);    // Delete file + reset status
+}
+```
+
+### GemmaService — switchModel()
+**File:** `lib/services/gemma/gemma_service.dart`
+```dart
+abstract interface class GemmaService {
+  Future<void> switchModel({required String modelPath, int maxTokens});
+}
+```
+Implementation: dispose old model → `FlutterGemma.installModel()` → `FlutterGemma.getActiveModel()`.
+
+### ModelBloc — Dynamic State
+```dart
+class ModelLoaded extends ModelState {
+  final List<ModelInfo> llmModels;           // Thay vì gemmaInfo đơn
+  final ModelInfo geckoInfo;
+  final bool gemmaReady;
+  final bool geckoReady;
+  final String activeLlmFileName;            // Mới
+}
+```
+Events mới: `ModelDownloadRequested(fileName)`, `ActiveModelChanged(fileName)`, `ModelDeleted(fileName)`.
+
+### GemmaService.initialize() — Graceful Degradation
+```dart
+try {
+  _model = await FlutterGemma.getActiveModel(...);
+} catch (e) {
+  log_util.log.w('⚠️ [GemmaService] No model available yet: $e');
+  _model = null;  // Không throw — ModelBloc sẽ init sau
+}
+```
+
+---
+
 ## Ongoing Issues
 
 - 🔴 **P0 — GPU crash** (`clEnqueueReadBuffer` / `litert_tensor_buffer.h:748`) — **Đã giảm thiểu nhờ Session API fix + turn payload giảm + DeviceCapability low-tier (1024 tokens).** Dynamic Budget giúp factual queries dành 58% budget cho RAG (1188 tokens) mà không crash. Cần test thêm với nhiều chunks hơn. *(13/06/2026)*
@@ -80,6 +143,10 @@
 | **Dynamic Budget Allocation** | Thêm `budget_allocation.dart` (QueryType, ContextBudget, BudgetAllocation). Sửa `chat_bloc.dart`: phân bổ budget động theo loại câu hỏi. Session init giữ 35% riêng (`kSessionInitHistoryRatio`). | 13/06/2026 |
 | **Hybrid Search BM25** | Thêm `bm25_service.dart` + `bm25_service_impl.dart` (FTS5 + RRF). Sửa `rag_service_impl.dart`: hybrid search pipeline (dense→sparse→RRF→try-fit). Sửa `document_upload_queue.dart`: BM25 indexing step. DB schemaVersion 4→5. | 13/06/2026 |
 | **Dynamic contextWindow theo thiết bị** | Thêm `device_capability.dart` (3-tier: 4096/2048/1024). Sửa `main.dart` + `service_locator.dart`. Dùng `device_info_plus` để detect RAM. | 13/06/2026 |
+| **Full Multi-Model Support** | Thêm Qwen2.5-1.5B, `switchModel()` trong GemmaService, `ModelBloc` dynamic state, `ModelManagerPage` dynamic LLM list + radio active. | **14/06/2026** |
+| **SettingsPage cleanup** | Xoá dead UI (Cấu hình RAG, Chat). Thêm default model selector + available models. Implement "Xoá tất cả dữ liệu" + "Đánh chỉ mục lại" thật. | **14/06/2026** |
+| **ModelOnboardingCoordinator** | Qwen2.5 default, dùng `ModelDownloadRequested` thay `GemmaDownloadStarted`. | **14/06/2026** |
+| **ModelNotLoadedException crash** | `GemmaService.initialize()` graceful degradation — không throw khi chưa có model. `main.dart` wrap try-catch. | **14/06/2026** |
 
 ---
 
@@ -94,6 +161,9 @@
 | `bm25_service_impl.dart` | `VERSION=bm25_v1` | Verify BM25 FTS5 implementation đang chạy | 13/06/2026 |
 | `chat_bloc.dart` | `VERSION=dynamic_budget_v3` (log) | Verify budget phân bổ động trong log | 13/06/2026 |
 | `device_capability.dart` | — | Log: 📱 [Device] Tier: high/medium/low, contextWindow: N | 13/06/2026 |
+| `model_manager_service.dart` | — | Multi-model: `allLlmModels`, `activeLlmFileName`, `downloadModel()`, `deleteModel()` | **14/06/2026** |
+| `gemma_service.dart` | — | `switchModel()` — dispose old → install new → init | **14/06/2026** |
+| `model_bloc.dart` | — | Dynamic state: `List<ModelInfo> llmModels` + `activeLlmFileName` | **14/06/2026** |
 
 ---
 
@@ -113,6 +183,10 @@
 - **Hybrid Search Fallback:** Nếu BM25 không tìm thấy kết quả, tự động fallback về dense search. Nếu cả 2 rỗng → skip RAG.
 - **DeviceCapability:** Detect device tier từ physical RAM (Android) hoặc model name (iOS). Chạy 1 lần ở `main()`.
 - **`_recreateSession()`:** Fallback khi session bị mất giữa chừng (hiếm). Tạo session mới + replay history.
+- **Multi-Model:** User có thể tải/xoá/chuyển đổi LLM models. Active model persist qua SharedPreferences (`active_llm_model` key). Model mặc định: Qwen2.5-1.5B.
+- **`GemmaService.initialize()` không throw:** Khi chưa có model, chỉ log + `_model = null`. ModelBloc sẽ init sau khi download.
+- **ModelDeleted fallback:** Nếu xoá active model, tự động chuyển về default (`kDefaultModelFileName`). Nếu default đã download → switch ngay.
+- **Qwen2.5 file:** `Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm` (~1.49 GB). Download từ HuggingFace litert-community repo.
 
 ---
 

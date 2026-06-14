@@ -317,7 +317,12 @@ class ChatBloc extends Bloc<ChatEvent, ChatState> {
       final modelState = _modelBloc.state;
 
       if (modelState is ModelLoaded) {
-        final isDownloaded = modelState.gemmaInfo.status == ModelStatus.downloaded;
+        // Kiểm tra active model đã download chưa
+        final activeModel = modelState.llmModels.firstWhere(
+          (m) => m.fileName == modelState.activeLlmFileName,
+          orElse: () => modelState.llmModels.first,
+        );
+        final isDownloaded = activeModel.status == ModelStatus.downloaded;
 
         if (isDownloaded && !modelState.gemmaReady) {
           _pendingMessage = event.content;

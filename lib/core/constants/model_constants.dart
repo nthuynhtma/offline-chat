@@ -3,6 +3,16 @@ const String kGemmaModelFileName = 'gemma-4-E2B-it.litertlm';
 const String kGeckoModelFileName = 'Gecko_256_quant.tflite';
 const String kGeckoTokenizerFileName = 'sentencepiece.model';
 
+// Qwen2.5 model constants (NEW)
+const String kQwenModelFileName = 'Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm';
+const String kQwenModelUrl =
+    'https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/'
+    'Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm';
+const int kQwenModelSizeBytes = 1597931520; // ~1.49 GB (q8 quantized)
+
+/// Default model mới: Qwen2.5
+const String kDefaultModelFileName = kQwenModelFileName;
+
 /// Max tokens (context window) cấp cho Gemma runtime (mặc định).
 /// Model hỗ trợ tới 32K, nhưng mobile RAM giới hạn.
 /// Giá trị thực tế được detect từ device capability tại runtime.
@@ -78,6 +88,41 @@ const int kTelemetryTopScoresCount = 5;
 
 /// Ngưỡng score để phân loại weak retrieval (model-agnostic, có thể tune sau)
 const double kWeakScoreThreshold = 0.75;
+
+/// === Available LLM models registry (NEW) ===
+
+/// ModelInfo cho 1 model có sẵn trong app.
+class AvailableModelInfo {
+  final String name;
+  final String fileName;
+  final String downloadUrl;
+  final int fileSizeBytes;
+
+  const AvailableModelInfo({
+    required this.name,
+    required this.fileName,
+    required this.downloadUrl,
+    required this.fileSizeBytes,
+  });
+}
+
+/// Danh sách tất cả LLM models mà app hỗ trợ.
+/// User có thể tải thêm bất kỳ lúc nào.
+const List<AvailableModelInfo> kAvailableLlmModels = [
+  AvailableModelInfo(
+    name: 'Qwen2.5-1.5B Instruct (mặc định)',
+    fileName: kQwenModelFileName,
+    downloadUrl: kQwenModelUrl,
+    fileSizeBytes: kQwenModelSizeBytes,
+  ),
+  AvailableModelInfo(
+    name: 'Gemma 4E2B IT',
+    fileName: kGemmaModelFileName,
+    downloadUrl:
+        'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm',
+    fileSizeBytes: 2588147712,
+  ),
+];
 
 /// === Memory budget config (dynamic theo context window) ===
 

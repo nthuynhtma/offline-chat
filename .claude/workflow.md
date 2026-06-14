@@ -10,13 +10,14 @@
 │  │ Session   │    │  Chat    │    │Knowledge │    │ Settings  │     │
 │  │ List Page │───▶│  Page    │───▶│  Page    │    │  Page    │     │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
-│                       │                                              │
+│                       │                    (model selector,          │
+│                       │              available models, danger zone)  │
 │                       ▼                                              │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │                    CORE ENGINE                               │   │
 │  │  ┌────────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │   │
-│  │  │  Gemma LLM │  │  Gecko   │  │  BM25    │  │  SQLite  │  │   │
-│  │  │  (4-E2B)   │  │ Embedding│  │  FTS5    │  │  (drift) │  │   │
+│  │  │  Qwen2.5/  │  │  Gecko   │  │  BM25    │  │  SQLite  │  │   │
+│  │  │  Gemma LLM │  │ Embedding│  │  FTS5    │  │  (drift) │  │   │
 │  │  └────────────┘  └──────────┘  └──────────┘  └──────────┘  │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -24,7 +25,7 @@
 
 ---
 
-## 2. App Initialization Flow
+## 2. App Initialization Flow (updated 14/06/2026)
 
 ```
 main()
@@ -33,39 +34,38 @@ main()
   ├─ SystemChrome.setPreferredOrientations([portraitUp])
   ├─ Global error handlers (FlutterError + PlatformDispatcher)
   │
-  ├─ [NEW] DEVICE CAPABILITY DETECTION
+  ├─ DEVICE CAPABILITY DETECTION
   │    └─ DeviceCapability.detectTier()
   │         ├─ Android: physicalRamSize (MB) → convert GB
-  │         ├─ iOS: infer từ model name (iPhone15,2+ = high...)
-  │         └─ Lưu contextWindow vào DeviceCapabilityHolder
-  │              high (≥8GB)=4096, medium (6GB)=2048, low (≤4GB)=1024
+  │         └─ iOS: infer từ model name
   │    Log: 📱 [Device] Tier: X, contextWindow: Y
   │
   ├─ FlutterGemma.initialize()            // Load native libs
   ├─ setupLocator()                       // DI Registration
   │    │
   │    ├─ AppDatabase                     // SQLite drift
-  │    ├─ ModelManagerService             // Download/load models
-  │    ├─ GemmaService                    // LLM wrapper
+  │    ├─ ModelManagerService             // Download/load/delete/switch models
+  │    ├─ GemmaService                    // LLM wrapper (+ switchModel!)
   │    ├─ GeckoService → GeckoRetryService
-  │    ├─ Bm25Service → Bm25ServiceImpl    // FTS5 search
-  │    ├─ VectorStoreService              // Cosine similarity
-  │    ├─ RagService → RagServiceImpl     // Hybrid search
+  │    ├─ Bm25Service → Bm25ServiceImpl
+  │    ├─ VectorStoreService
+  │    ├─ RagService → RagServiceImpl
   │    ├─ PromptBuilder → PromptBuilderImpl
-  │    ├─ SummaryService                  // Auto-summary
-  │    ├─ MemoryStoreService              // User memory
-  │    ├─ DocumentUploadQueue             // File processing pipeline
-  │    └─ Blocs: ModelBloc, SessionBloc, ChatBloc, KnowledgeBloc
-  │         └─ ChatBloc nhận contextWindow động từ DeviceCapabilityHolder
+  │    ├─ SummaryService + MemoryStoreService
+  │    ├─ DocumentUploadQueue
+  │    └─ Blocs: ModelBloc (dynamic state), SessionBloc, ChatBloc, KnowledgeBloc
   │
-  ├─ [NEW] GemmaService.initialize(maxTokens: contextWindow)
-  │    └─ maxTokens = DeviceCapabilityHolder.contextWindow (1024/2048/4096)
+  ├─ GemmaService.initialize(maxTokens: contextWindow)  ← GRACEFUL
+  │    └─ Nếu chưa có model: log warning, _model=null (không crash)
+  │       ModelBloc sẽ init sau khi download → switchModel()
   │
   └─ runApp(App())
        │
        ├─ MultiBlocProvider (4 singletons: Model, Session, Knowledge, SessionFiles)
-       ├─ GoRouter (/ → /chat/:id → /knowledge → /settings/models)
-       └─ ModelOnboardingCoordinator      // Check & prompt download
+       │    └─ ModelBloc dispatch StatusChecked → kiểm tra active model đã download chưa
+       ├─ GoRouter (/ → /chat/:id → /knowledge → /settings → /settings/models)
+       └─ ModelOnboardingCoordinator → show dialog nếu chưa có LLM model
+            └─ Mặc định: Qwen2.5-1.5B (1.5GB) + Gecko (111MB)
 ```
 
 ---
@@ -73,234 +73,124 @@ main()
 ## 3. Chat Flow (Chi tiết từng bước)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ USER GỬI MESSAGE                                                               │
-│                                                                                 │
-│  "cách phòng trừ sâu bệnh"                                                     │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 1. GUARD CHECKS                                                                 │
-│                                                                                 │
-│    ├─ isClosed? → return                                                        │
-│    ├─ _currentSessionId? → return                                               │
-│    ├─ state is ChatStreaming? → return (block double send)                      │
-│    ├─ _isWaitingForModel? → return                                              │
-│    └─ Gemma isReady?                                                            │
-│         ├─ NO → subscribe ModelBloc, _isWaitingForModel=true, return            │
-│         └─ YES → continue                                                       │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 2. SAVE USER MESSAGE → DB                                                       │
-│                                                                                 │
-│    Log: 💾 [SendMessage] Đã lưu user message vào DB (id=xxx)                    │
-│    Emit: ChatThinking (messages)                                                │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 3. DYNAMIC BUDGET ALLOCATION  [VERSION=dynamic_budget_v3]                      │
-│                                                                                 │
-│    ContextBudget.forQuery("cách phòng trừ sâu bệnh")                            │
-│      │                                                                          │
-│      ├─ "cách phòng trừ sâu bệnh" → _classifyQuery()                           │
-│      │                                                                          │
-│      │  Query Classification (heuristics, 8 types, song ngữ Việt-Anh):          │
-│      │  ┌──────────────────────────────────────────────────────────────────┐    │
-│      │  │ 1. translation: "dịch sang", "translate to"                      │    │
-│      │  │ 2. summarization: "tóm tắt", "summary", "summarize"             │    │
-│      │  │ 3. conversational: greeting regex, "bạn là ai", "who are you"   │    │
-│      │  │ 4. creative: "viết một", "write a story", "hãy kể"              │    │
-│      │  │ 5. mathCoding: "giải phương trình", "implement", "algorithm"    │    │
-│      │  │ 6. complex: "phân tích", "tại sao", "explain in detail"         │    │
-│      │  │ 7. multiHop: "so sánh A và B", "difference between"             │    │
-│      │  │ 8. conversational (short): length < 15 ký tự                     │    │
-│      │  │ 9. factual (default): mọi thứ còn lại                           │    │
-│      │  └──────────────────────────────────────────────────────────────────┘    │
-│      │                                                                          │
-│      └─ Kết quả: QueryType.factual                                             │
-│                                                                                 │
-│    Budget Allocation (2048 tokens) — 8 query types:                             │
-│    ┌────────────────┬────────┬────────┬─────────┬────────┬──────────┬───────┐  │
-│    │ Query Type     │ System │ Memory │ History │  RAG   │ Response │ Total │  │
-│    ├────────────────┼────────┼────────┼─────────┼────────┼──────────┼───────┤  │
-│    │ conversational │  10%   │   5%   │   45%   │  15%   │   25%    │ 100%  │  │
-│    │ factual        │   5%   │   2%   │   10%   │  58%   │   25%    │ 100%  │  │
-│    │ complex        │   5%   │   5%   │   20%   │  45%   │   25%    │ 100%  │  │
-│    │ creative       │  10%   │   5%   │   25%   │  10%   │   50%    │ 100%  │  │
-│    │ summarization  │   2%   │   3%   │    5%   │  70%   │   20%    │ 100%  │  │
-│    │ translation    │   5%   │   5%   │   30%   │  10%   │   50%    │ 100%  │  │
-│    │ mathCoding     │   5%   │   5%   │   10%   │  50%   │   30%    │ 100%  │  │
-│    │ multiHop       │   5%   │   5%   │   25%   │  40%   │   25%    │ 100%  │  │
-│    └────────────────┴────────┴────────┴─────────┴────────┴──────────┴───────┘  │
-│                                                                                 │
-│    questionTokens = 10 (ước lượng)                                              │
-│    ragBudget = 1188 - 10 = 1178 tokens                                          │
-│                                                                                 │
-│    Log: 📊 [Budget] VERSION=dynamic_budget_v3                                   │
-│         queryType=factual, actualHistory=15/205, rag=1178/1188                  │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 4. HYBRID SEARCH (RAG)  [VERSION=hybrid_v1]                                    │
-│                                                                                 │
-│    RagService.retrieve(query, tokenBudget=1178, scope, sessionId)               │
-│      │                                                                          │
-│      ├─ 4a. EARLY EXIT GUARD                                                   │
-│      │    ├─ tooShort: ≤2 từ, không ?, <15 ký tự? → NO                         │
-│      │    ├─ greeting: hi/hello/chào? → NO                                     │
-│      │    └─ capability: bạn là ai? → NO                                       │
-│      │    → continue                                                           │
-│      │                                                                          │
-│      ├─ 4b. EMBED QUERY                                                        │
-│      │    GeckoService.embed("cách phòng trừ sâu bệnh")                         │
-│      │    → List<double>[768] (947ms)                                           │
-│      │                                                                          │
-│      ├─ 4c. FILTER DOCUMENTS BY SCOPE                                          │
-│      │    KnowledgeScope.attachedAndGlobal                                      │
-│      │    → getCompletedGlobalDocumentIds()                                     │
-│      │    → getCompletedDocumentIdsBySessionId(sessionId)                       │
-│      │    → getDocumentIdsBySession(sessionId)                                  │
-│      │    → allowedDocIds = {doc1, doc2, doc3} (15 chunks)                      │
-│      │                                                                          │
-│      ├─ 4d. DENSE SEARCH (Gecko)                                               │
-│      │    VectorStoreService.search(queryVector, topK=50, threshold=0.7)        │
-│      │    → 2-step: filter → preTopK(200) → cosine → re-rank → topK(50)       │
-│      │    → denseResults = [chunkA(0.855), chunkB(0.823), ...]                 │
-│      │                                                                          │
-│      ├─ 4e. SPARSE SEARCH (BM25)  [VERSION=bm25_v1]                            │
-│      │    Bm25Service.search(query, allowedDocIds, topK=50)                     │
-│      │      ├─ sanitize: "cách phòng trừ sau bệnh" → ""cách phòng trừ sau      │
-│      │      │            bệnh"" (phrase search)                                 │
-│      │      ├─ FTS5 MATCH query                                                 │
-│      │      ├─ BM25 ranking + filter by document_id                             │
-│      │      └─ sparseResults = [...] (nếu có)                                   │
-│      │    Log: 🔍 [BM25] Searching: query="..." sanitized="..."                 │
-│      │                                                                          │
-│      │    ⚠️ Graceful Degradation:                                              │
-│      │    ├─ Cả 2 rỗng → skip RAG                                               │
-│      │    ├─ Dense rỗng → fallback sparse                                       │
-│      │    ├─ Sparse rỗng → fallback dense          ← Trường hợp này            │
-│      │    └─ Cả 2 có → RRF fusion                                                │
-│      │                                                                          │
-│      ├─ 4f. RECIPROCAL RANK FUSION (nếu cả 2 có kết quả)                       │
-│      │    RRF(denseResults, sparseResults, k=60):                               │
-│      │    ┌────────────────────────────────────────────────────────────────┐    │
-│      │    │ score(chunk) = Σ 1/(k + rank_dense + 1) + 1/(k + rank_sparse+1)│    │
-│      │    │ Sort desc → fusedResults                                         │    │
-│      │    └────────────────────────────────────────────────────────────────┘    │
-│      │    Log: [RAG] VERSION=hybrid_v1 dense=1 sparse=0 fused=1                │
-│      │                                                                          │
-│      └─ 4g. TRY-FIT PACKING  [VERSION=try_fit_v2]                              │
-│           effectiveCap = min(tokenBudget=1178, kMaxRagTokens=500) = 500         │
-│           labelTokenOverhead = ~4 tokens                                        │
-│           ┌─────────────────────────────────────────────────────────────┐       │
-│           │ for (chunk in results sorted by score desc):                │       │
-│           │   if (chunkCount >= kMaxRagChunks=3) break                  │       │
-│           │   if (chunkToken > effectiveCap) continue  // skip oversized│       │
-│           │   if (tokenSum + chunkToken <= effectiveCap):               │       │
-│           │     trimmed.add(chunk)                                      │       │
-│           │     tokenSum += chunkToken                                   │       │
-│           │     chunkCount++                                             │       │
-│           │     if (tokenSum >= effectiveCap) break                     │       │
-│           └─────────────────────────────────────────────────────────────┘       │
-│           Log: [RAG] packing matched=1 packed=1 tokens=94 cap=500               │
-│                                                                                 │
-│    Return: RagContext(chunks=[phong_tru_sau_benh], tokenCount=94, bestScore=0.855)
-│                                                                                 │
-│    Total retrieval time: 1033ms (embed 947ms + search 86ms)                     │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 5. BUILD TURN PAYLOAD  [VERSION=session_api_v1]                                 │
-│                                                                                 │
-│    PromptBuilder.buildTurnPayload(                                              │
-│      question: "cách phòng trừ sâu bệnh",                                       │
-│      ragContext: RagContext(1 chunk, 94 tokens)                                 │
-│    )                                                                            │
-│      │                                                                          │
-│      └─ Kết quả (313 chars):                                                   │
-│         ┌────────────────────────────────────────────────────────────┐          │
-│         │ === Reference Documents ===                               │          │
-│         │                                                           │          │
-│         │ [Document 1]                                              │          │
-│         │ PHÒNG TRỪ SÂU BỆNH                                        │          │
-│         │                                                           │          │
-│         │ 1. Kiểm tra vườn thường xuyên                             │          │
-│         │ 2. Sử dụng giống kháng bệnh                               │          │
-│         │ 3. Bón phân hợp lý                                        │          │
-│         │ 4. Sử dụng thuốc bảo vệ thực vật                          │          │
-│         │ 5. Vệ sinh vườn sạch sẽ                                   │          │
-│         │                                                           │          │
-│         │ === Current Question ===                                  │          │
-│         │ cách phòng trừ sau bệnh                                   │          │
-│         └────────────────────────────────────────────────────────────┘          │
-│                                                                                 │
-│    Log: 🔨 [PromptBuilder] Turn payload built (313 chars, hasRAG=true)          │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 6. CHECK SESSION HEALTH                                                         │
-│                                                                                 │
-│    if (!_gemmaService.hasActiveSession) → _recreateSession()                    │
-│      ├─ Build system instruction (từ summary hoặc default)                      │
-│      ├─ createSession(systemInstruction)                                        │
-│      └─ Replay history (35% budget)                                             │
-│                                                                                 │
-│    Session OK → continue                                                       │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 7. STREAM RESPONSE                                                              │
-│                                                                                 │
-│    GemmaService.generateWithSession(turnPayload=313 chars)                      │
-│      │                                                                          │
-│      ├─ [FfiInferenceModelSession/perf] time-to-first-chunk (prefill): 6691ms  │
-│      │                                                                          │
-│      ├─ Log: prompt head (500 chars)                                            │
-│      │                                                                          │
-│      ├─ token[1]  = "Chào"          (22:01:49.044)                             │
-│      ├─ token[2]  = " bạn"          (22:01:49.445)                             │
-│      ├─ token[3]  = ","             (22:01:49.453)                             │
-│      ├─ token[4]  = " để"           (22:01:49.455)                             │
-│      ├─ token[5]  = " phòng"        (22:01:49.668)                             │
-│      ├─ ...                                                                     │
-│      ├─ token[20] = "1"             (22:01:51.262)                             │
-│      │                                                                          │
-│      ├─ [FfiInferenceModelSession/perf] generation total: 26218ms              │
-│      │   (prefill 6691ms + decode 19527ms over 167 chunks, ~8.5 chunks/sec)    │
-│      │                                                                          │
-│      └─ Log: [Gemma] generateWithSession hoàn tất: 167 tokens                  │
-│                                                                                 │
-│    Emit: ChatStreaming (messages, streamingText, streamingId, ragResults)       │
-└───────────────────────────┬─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│ 8. SAVE & COMPLETE                                                              │
-│                                                                                 │
-│    ├─ Save assistant message → DB                                               │
-│    ├─ updateSessionTimestamp()                                                  │
-│    ├─ _tryTriggerAutoSummary()                                                  │
-│    │    └─ Kiểm tra runningTokenCount > summaryTrigger?                        │
-│    │         ├─ YES → unawaited(_runAutoSummary())                              │
-│    │         └─ NO → updateRunningTokenCount()                                  │
-│    ├─ Emit: ChatLoaded (finalMessages)                                          │
-│    └─ Log: ✅ [SendMessage] Hoàn tất: 2 messages                                │
-│         Assistant response: "Chào bạn, để phòng trừ sâu bệnh..."               │
-└─────────────────────────────────────────────────────────────────────────────────┘
+USER GỬI MESSAGE
+  "cách phòng trừ sâu bệnh"
+  │
+  ▼
+1. GUARD CHECKS
+    ├─ isClosed? → return
+    ├─ _currentSessionId? → return
+    ├─ state is ChatStreaming? → return (block double send)
+    ├─ _isWaitingForModel? → return
+    └─ Gemma isReady?
+         ├─ NO → check ModelLoaded:
+         │     ├─ Active model downloaded? → subscribe ModelBloc, wait
+         │     └─ Active model NOT downloaded? → ChatError(needsModelDownload)
+         └─ YES → continue
+  │
+  ▼
+2. SAVE USER MESSAGE → DB → emit ChatThinking
+  │
+  ▼
+3. DYNAMIC BUDGET ALLOCATION [VERSION=dynamic_budget_v3]
+    ContextBudget.forQuery("cách phòng trừ sâu bệnh")
+      → QueryType.factual
+    Allocation: history=205, rag=1188, response=512 (contextWindow=2048)
+  │
+  ▼
+4. HYBRID SEARCH (RAG) [VERSION=hybrid_v1]
+    RagService.retrieve(query, tokenBudget=1178, scope, sessionId)
+      ├─ Embed → Gecko (947ms)
+      ├─ Dense search (topK=50)
+      ├─ Sparse search → BM25 FTS5 (topK=50)
+      ├─ RRF fusion (k=60) hoặc fallback
+      └─ Try-fit packing → RagContext(chunks, tokenCount, bestScore)
+  │
+  ▼
+5. BUILD TURN PAYLOAD [VERSION=session_api_v1]
+    PromptBuilder.buildTurnPayload(question, ragContext)
+    → "=== Reference Documents ===\n[Document 1]...\n=== Current Question ==="
+    (~300-800 chars)
+  │
+  ▼
+6. CHECK SESSION HEALTH
+    if (!_gemmaService.hasActiveSession) → _recreateSession()
+  │
+  ▼
+7. STREAM RESPONSE
+    GemmaService.generateWithSession(turnPayload)
+    → Stream<String> → emit ChatStreaming
+  │
+  ▼
+8. SAVE & COMPLETE
+    ├─ Save assistant message → DB
+    ├─ _tryTriggerAutoSummary()
+    └─ emit ChatLoaded
 ```
 
 ---
 
-## 4. Streaming Cancelled Flow
+## 4. Multi-Model Operation Flow (NEW 14/06/2026)
+
+### Switch Model
+```
+User selects model in ModelManagerPage (radio) or SettingsPage (dropdown)
+  │
+  ▼
+ActiveModelChanged(fileName)
+  │
+  ├─ _modelManager.setActiveLlmModel(fileName)  // Persist to SharedPreferences
+  │
+  ├─ isModelDownloaded(fileName)?
+  │    ├─ YES → getModelPath() → _gemmaService.switchModel(path)
+  │    │           ├─ _closeSessionInternal()
+  │    │           ├─ _model = null
+  │    │           ├─ FlutterGemma.installModel().fromFile(path).install()
+  │    │           ├─ FlutterGemma.getActiveModel(maxTokens, gpu)
+  │    │           └─ _model ready → gemmaReady = true
+  │    │
+  │    └─ NO → _gemmaService.closeSession() (chỉ close, không switch)
+  │              → gemmaReady = false (model chưa tải)
+  │
+  ├─ emit ModelLoaded(activeLlmFileName: fileName, gemmaReady)
+  └─ Log: [ModelBloc] ActiveModelChanged: fileName
+```
+
+### Download Model
+```
+ModelDownloadRequested(fileName)
+  │
+  ├─ ModelManagerService.downloadModel(fileName)
+  │    └─ _startDownload() → progress stream → _ProgressUpdate events
+  │
+  └─ Khi download xong:
+       ├─ ModelBloc._onProgressUpdate()
+       │    └─ activeModel.status == downloaded → _tryInitializeActiveModel()
+       │         └─ GemmaService.switchModel(path) → init
+       └─ emit ModelLoaded(gemmaReady: true)
+```
+
+### Delete Model
+```
+ModelDeleted(fileName)
+  │
+  ├─ wasActive = (fileName == activeLlmFileName)?
+  │    ├─ YES → _gemmaService.closeSession()
+  │    └─ NO → skip
+  │
+  ├─ ModelManagerService.deleteModel(fileName)
+  │    └─ Xoá file + reset status
+  │
+  ├─ if wasActive:
+  │    ├─ setActiveLlmModel(kDefaultModelFileName)  // Fallback về Qwen2.5
+  │    └─ if default downloaded → switchModel(defaultPath)
+  │
+  └─ emit ModelLoaded(activeLlmFileName: default, gemmaReady)
+```
+
+---
+
+## 5. Streaming Cancelled Flow
 
 ```
 User nhấn Stop
@@ -318,7 +208,7 @@ StreamingCancelled event
 
 ---
 
-## 5. Session Init Flow
+## 6. Session Init Flow
 
 ```
 ChatPage mount(sessionId)
@@ -329,184 +219,82 @@ SessionInitialized(sessionId)
   ├─ emit ChatLoading
   ├─ load messages từ SQLite
   ├─ hydrate KnowledgeScope từ DB
+  ├─ Nếu !gemmaService.isReady → skip session creation, emit ChatLoaded(messages)
   │
   ├─ Kiểm tra SessionMemory (summary)
   │    ├─ Có summary → MemoryPromptFormatter.build(summary, memories)
-  │    │              → createSession(systemInstruction)
   │    └─ Không summary → PromptBuilder.buildSystemInstruction(memories)
-  │                       → createSession(systemInstruction)
+  │    → createSession(systemInstruction)
   │
-  ├─ Replay history (MỘT LẦN DUY NHẤT)
-  │    ├─ Budget: kSessionInitHistoryRatio = 35% = 717 tokens
-  │    ├─ Duyệt messages từ cuối lên, fit trong budget
-  │    └─ addHistoryMessage(role, content) cho từng message
-  │
+  ├─ Replay history (MỘT LẦN, 35% budget)
   └─ emit ChatLoaded(messages)
 ```
 
 ---
 
-## 6. Document Upload Flow (RAG Ingestion)
+## 7. Document Upload Flow (RAG Ingestion)
 
 ```
 User chọn file (PDF/DOCX/TXT/MD)
   │
   ▼
 FilePicker (allowMultiple)
-  │
-  ▼
-DocumentRepository.insertDocument(status=pending)
-  │
-  ▼
-DocumentUploadQueue.enqueue(job)
+  → DocumentRepository.insertDocument(status=pending)
+  → DocumentUploadQueue.enqueue(job)
   │
   ▼
 _processNext() → _processJob()
-  │
   ├── Step 1: PARSE (0.00 → 0.10)
-  │    DocumentParserService.parse(file) → rawText
-  │    Log: 💡 [UploadQueue] Processing: filename.pdf
-  │
-  ├── Step 2: CHUNK (0.10 → 0.20)
-  │    ChunkingService.chunk(rawText, chunkSize=200, overlap=50)
-  │    Log: Chunks: 8 chunks
-  │    Log: chunk[0] chars=751 tokens=301 preview="..."
-  │
+  ├── Step 2: CHUNK (0.10 → 0.20)  [chunkSize=200, overlap=50]
   ├── Step 3: EMBED (0.20 → 0.95)  [Progressive per chunk]
-  │    for each chunk:
-  │      _gecko.embed(chunk) → vector[768]
-  │      progress = 0.20 + 0.75 * (i/total)
-  │
   │    ⚠️ Guard: if (!_gecko.isReady) → throw UploadQueueException
-  │
   ├── Step 4a: INSERT DB (0.95 → 1.00)
-  │    ├─ Tạo ChunksCompanion (UUID ids)
-  │    ├─ _chunksDao.insertChunks()
-  │    ├─ _vectorStore.insertBatch()
-  │    └─ Log: [UploadQueue] Completed: 8 chunks, 8 vectors
-  │
-  ├── [NEW] Step 4b: INDEX BM25
-  │    _bm25Service.indexChunks(chunks)
-  │    Log: 📚 [BM25] Indexed 8 chunks into FTS5
-  │
+  │    └─ ChunksCompanion + Vector insert batch
+  ├── Step 4b: INDEX BM25
+  │    └─ _bm25Service.indexChunks(chunks) → FTS5
   └── Step 5: FINALIZE
-       ├─ _docsDao.updateChunkCount()
-       ├─ _docsDao.updateDocumentStatus(completed)
-       └─ _resultController.add(success)
+       └─ status=completed, chunkCount updated
 ```
 
 ---
 
-## 7. Hybrid Search Pipeline (Chi tiết)
+## 8. Clear All Data Flow (NEW 14/06/2026)
 
 ```
-                    ┌─────────────────────────┐
-                    │   User Query            │
-                    │  "bón phân NPK"         │
-                    └───────────┬─────────────┘
-                                │
-                                ▼
-              ┌─────────────────────────────────┐
-              │   shouldSkipRag()               │
-              │   - tooShort? → NO              │
-              │   - greeting? → NO              │
-              │   - capability? → NO            │
-              │   → CONTINUE                    │
-              └─────────────────────────────────┘
-                                │
-                                ▼
-              ┌─────────────────────────────────┐
-              │   GeckoService.embed(query)     │
-              │   → 768-dim vector              │
-              │   Latency: ~947ms               │
-              └───────────┬─────────────────────┘
-                          │
-                          ▼
-     ┌─────────────────────────────────────────────────────┐
-     │                  SPLIT                               │
-     │                                                      │
-     │  ┌─────────────────┐     ┌─────────────────┐        │
-     │  │ DENSE SEARCH     │     │ SPARSE SEARCH   │        │
-     │  │ (Gecko)          │     │ (BM25 FTS5)     │        │
-     │  │                  │     │                  │        │
-     │  │ topK=50          │     │ topK=50          │        │
-     │  │ threshold=0.7    │     │ query sanitize   │        │
-     │  │ cosine sim       │     │ BM25 ranking     │        │
-     │  │ preTopK=200      │     │ filter by docId  │        │
-     │  │                  │     │                  │        │
-     │  │ denseResults     │     │ sparseResults    │        │
-     │  │ [50 candidates]  │     │ [50 candidates]  │        │
-     │  └────────┬─────────┘     └────────┬─────────┘        │
-     │           │                        │                   │
-     └───────────┼────────────────────────┼───────────────────┘
-                 │                        │
-                 ▼                        ▼
-     ┌──────────────────────────────────────────┐
-     │           RRF FUSION                     │
-     │                                          │
-     │  score(chunk) = Σ 1/(k + rank + 1)      │
-     │  k = 60                                  │
-     │  Sort desc                               │
-     │                                          │
-     │  ⚠️ Graceful Degradation:                │
-     │  ├─ Cả 2 rỗng → skip RAG                │
-     │  ├─ Dense rỗng → dùng sparse            │
-     │  ├─ Sparse rỗng → dùng dense            │
-     │  └─ Cả 2 có → RRF                       │
-     └──────────────────┬───────────────────────┘
-                        │
-                        ▼
-     ┌──────────────────────────────────────────┐
-     │        TRY-FIT PACKING                   │
-     │                                          │
-     │  effectiveCap = min(budget, 500)         │
-     │  maxChunks = 3                           │
-     │  greedy knapsack                         │
-     │                                          │
-     │  Kết quả: RagContext                     │
-     │  ├─ chunks: [top chunks]                 │
-     │  ├─ tokenCount: tổng tokens              │
-     │  └─ bestScore: highest score             │
-     └──────────────────────────────────────────┘
+SettingsPage → "Xoá tất cả dữ liệu" → confirm dialog
+  │
+  ▼
+_executeClearAllData()
+  │
+  ├─ _gemmaService.closeSession()
+  ├─ Raw SQL: DELETE FROM vectors, chunks, messages, session_document_refs,
+  │           session_memory, user_memory, documents, sessions, chunks_fts
+  ├─ SharedPreferences.remove('active_llm_model', 'hasSeenModelOnboarding')
+  ├─ Log success
+  ├─ Refresh: ModelBloc.StatusChecked, SessionBloc.SessionsLoaded,
+  │           KnowledgeBloc.DocumentsLoaded
+  └─ SnackBar "Đã xoá toàn bộ dữ liệu"
 ```
 
 ---
 
-## 8. Memory System
+## 9. Reindex Flow (NEW 14/06/2026)
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     MEMORY HIERARCHY                             │
-│                                                                  │
-│  Tier 1: WORKING MEMORY (Session API KV cache)                  │
-│  ├─ Recent 3-5 turns                                             │
-│  └─ Tự động quản lý bởi Gemma Session                           │
-│                                                                  │
-│  Tier 2: SESSION SUMMARY (~160 tokens, 8%)                       │
-│  ├─ Lưu trong session_memory table                               │
-│  ├─ Auto-summarize khi runningTokenCount > trigger               │
-│  └─ Dùng MemoryPromptFormatter.build() khi mở session            │
-│                                                                  │
-│  Tier 3: USER MEMORY (~40 tokens, 2%)                            │
-│  ├─ Lưu trong user_memory table (namespace:key:value)            │
-│  ├─ Extract mỗi 5 lần summarize                                  │
-│  └─ Dùng buildSystemInstruction() khi tạo session               │
-│                                                                  │
-│  Tier 4: EPISODIC MEMORY (DB only, chưa implement)               │
-│  └─ Full history, search on-demand (P2)                          │
-└──────────────────────────────────────────────────────────────────┘
-
-Auto-Summary Trigger:
-  runningTokenCount > availableConversationBudget * 0.65
-  → _runAutoSummary()
-     ├─ incrementalSummarize(oldSummary, newMessages)
-     ├─ saveSessionMemory()
-     └─ extractUserMemory() mỗi 5 lần
+SettingsPage → "Đánh chỉ mục lại" → confirm dialog
+  │
+  ▼
+_executeReindex()
+  │
+  ├─ DELETE vectors, chunks, chunks_fts
+  ├─ UPDATE documents SET status = pending, progress = 0
+  ├─ Enqueue all documents → DocumentUploadQueue
+  └─ SnackBar "Đã bắt đầu đánh chỉ mục lại N documents"
 ```
 
 ---
 
-## 9. Error Handling
+## 10. Error Handling Map
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -518,6 +306,9 @@ Auto-Summary Trigger:
 │  EmbeddingException → error log + retry                          │
 │  StorageException → error log                                    │
 │  UploadQueueException → status=failed, retry button              │
+│                                                                  │
+│  GemmaService.initialize() fail → GRACEFUL: log + _model=null   │
+│  GemmaService.switchModel() fail → ModelNotLoadedException      │
 │                                                                  │
 │  ⚠️ Session closed (Bad state)                                  │
 │     → Guard hasActiveSession → _recreateSession()                │
@@ -533,7 +324,7 @@ Auto-Summary Trigger:
 
 ---
 
-## 10. Data Flow Diagram (Tổng thể)
+## 11. Data Flow Diagram (Tổng thể)
 
 ```
 ┌─────────┐    ┌──────────────┐    ┌───────────────┐    ┌──────────┐
@@ -584,6 +375,6 @@ Auto-Summary Trigger:
                │    │   Streaming UI     │
                │    │   (token by token) │
                └───▶│                    │
-                    │ ChatStreaming emit  │
-                    │ Markdown render    │
-                    └────────────────────┘
+                     │ ChatStreaming emit  │
+                     │ Markdown render    │
+                     └────────────────────┘

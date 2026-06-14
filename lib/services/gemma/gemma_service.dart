@@ -37,6 +37,14 @@ abstract interface class GemmaService {
 
   /// Session hiện tại có sẵn sàng không.
   bool get hasActiveSession;
+
+  // ─── Multi-model API (NEW) ─────
+
+  /// Chuyển đổi sang model khác.
+  /// Dispose model cũ → install model mới → init.
+  /// [modelPath] đường dẫn tới file .litertlm trên thiết bị.
+  /// [maxTokens] số tokens tối đa cho context window.
+  Future<void> switchModel({required String modelPath, int maxTokens = kGemmaMaxTokens});
 }
 
 /// Implementation wrapping flutter_gemma package v0.16.x modern API.
@@ -76,10 +84,10 @@ class GemmaServiceImpl implements GemmaService {
       );
       log_util.log.i('🚀 [GemmaService] Model initialized with maxTokens=$maxTokens');
     } catch (e) {
-      if (e is StateError || e is ArgumentError) {
-        throw ModelNotLoadedException(message: e.toString());
-      }
-      rethrow;
+      // Không throw — graceful degradation khi chưa có model.
+      // ModelBloc sẽ init sau khi model được download.
+      log_util.log.w('⚠️ [GemmaService] No model available yet: $e');
+      _model = null;
     }
   }
 
@@ -247,6 +255,41 @@ class GemmaServiceImpl implements GemmaService {
       // Silent close
     }
     _session = null;
+  }
+
+  // ─── Multi-model API (NEW) ──────────────────────────────────────────
+
+  @override
+  Future<void> switchModel({required String modelPath, int maxTokens = kGemmaMaxTokens}) async {
+    log_util.log.i('[GemmaService] switchModel: modelPath=$modelPath, maxTokens=$maxTokens');
+
+    // Đóng session cũ
+    await _closeSessionInternal();
+
+    // Dispose model cũ
+    _model = null;
+
+    try {
+      // Install model mới
+      await FlutterGemma.installModel(
+        modelType: ModelType.gemmaIt,
+        fileType: ModelFileType.litertlm,
+      ).fromFile(modelPath).install();
+
+      // Init model mới
+      _model = await FlutterGemma.getActiveModel(
+        maxTokens: maxTokens,
+        preferredBackend: PreferredBackend.gpu,
+      );
+
+      log_util.log.i('🚀 [GemmaService] Switched model thành công: maxTokens=$maxTokens');
+    } catch (e) {
+      log_util.log.e('[GemmaService] switchModel lỗi: $e');
+      if (e is StateError || e is ArgumentError) {
+        throw ModelNotLoadedException(message: e.toString());
+      }
+      rethrow;
+    }
   }
 
   @override

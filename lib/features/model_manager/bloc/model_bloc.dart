@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' show File;
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:offline_chat/services/gecko/gecko_service.dart';
@@ -11,18 +11,20 @@ import 'package:offline_chat/core/utils/logger.dart' as log_util;
 // ─── Internal event ──────────────────────────────────────────────────────────
 
 class _ProgressUpdate extends ModelEvent {
-  final ModelInfo gemmaInfo;
+  final List<ModelInfo> llmModels;
   final ModelInfo geckoInfo;
   final bool tokenizerDownloaded;
+  final String activeLlmFileName;
 
   const _ProgressUpdate({
-    required this.gemmaInfo,
+    required this.llmModels,
     required this.geckoInfo,
     this.tokenizerDownloaded = false,
+    this.activeLlmFileName = kDefaultModelFileName,
   });
 
   @override
-  List<Object?> get props => [gemmaInfo, geckoInfo, tokenizerDownloaded];
+  List<Object?> get props => [llmModels, geckoInfo, tokenizerDownloaded, activeLlmFileName];
 }
 
 // ─── Public events ────────────────────────────────────────────────────────────
@@ -54,6 +56,33 @@ class DownloadCancelled extends ModelEvent {
   List<Object?> get props => [fileName];
 }
 
+/// (NEW) Tải 1 model bất kỳ theo fileName
+class ModelDownloadRequested extends ModelEvent {
+  final String fileName;
+  const ModelDownloadRequested(this.fileName);
+
+  @override
+  List<Object?> get props => [fileName];
+}
+
+/// (NEW) Chuyển active model
+class ActiveModelChanged extends ModelEvent {
+  final String fileName;
+  const ActiveModelChanged(this.fileName);
+
+  @override
+  List<Object?> get props => [fileName];
+}
+
+/// (NEW) Xoá 1 model (file + reset status)
+class ModelDeleted extends ModelEvent {
+  final String fileName;
+  const ModelDeleted(this.fileName);
+
+  @override
+  List<Object?> get props => [fileName];
+}
+
 // ─── States ───────────────────────────────────────────────────────────────────
 
 sealed class ModelState extends Equatable {
@@ -72,7 +101,10 @@ class ModelLoading extends ModelState {
 }
 
 class ModelLoaded extends ModelState {
-  final ModelInfo gemmaInfo;
+  /// Danh sách tất cả LLM models (đã có trong registry)
+  final List<ModelInfo> llmModels;
+
+  /// Thông tin Gecko (embedding model)
   final ModelInfo geckoInfo;
 
   /// true khi GemmaService đã initialize xong và sẵn sàng chat
@@ -81,29 +113,35 @@ class ModelLoaded extends ModelState {
   /// true khi GeckoService đã initialize xong và sẵn sàng embed
   final bool geckoReady;
 
+  /// File name của active LLM model
+  final String activeLlmFileName;
+
   const ModelLoaded({
-    required this.gemmaInfo,
+    required this.llmModels,
     required this.geckoInfo,
     this.gemmaReady = false,
     this.geckoReady = false,
+    this.activeLlmFileName = kDefaultModelFileName,
   });
 
   ModelLoaded copyWith({
-    ModelInfo? gemmaInfo,
+    List<ModelInfo>? llmModels,
     ModelInfo? geckoInfo,
     bool? gemmaReady,
     bool? geckoReady,
+    String? activeLlmFileName,
   }) {
     return ModelLoaded(
-      gemmaInfo: gemmaInfo ?? this.gemmaInfo,
+      llmModels: llmModels ?? this.llmModels,
       geckoInfo: geckoInfo ?? this.geckoInfo,
       gemmaReady: gemmaReady ?? this.gemmaReady,
       geckoReady: geckoReady ?? this.geckoReady,
+      activeLlmFileName: activeLlmFileName ?? this.activeLlmFileName,
     );
   }
 
   @override
-  List<Object?> get props => [gemmaInfo, geckoInfo, gemmaReady, geckoReady];
+  List<Object?> get props => [llmModels, geckoInfo, gemmaReady, geckoReady, activeLlmFileName];
 }
 
 class ModelError extends ModelState {
@@ -152,6 +190,9 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     on<GeckoDownloadStarted>(_onGeckoDownloadStarted);
     on<DownloadCancelled>(_onDownloadCancelled);
     on<_ProgressUpdate>(_onProgressUpdate);
+    on<ModelDownloadRequested>(_onModelDownloadRequested);
+    on<ActiveModelChanged>(_onActiveModelChanged);
+    on<ModelDeleted>(_onModelDeleted);
   }
 
   // ─── Handlers ──────────────────────────────────────────────────────────────
@@ -160,7 +201,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     StatusChecked event,
     Emitter<ModelState> emit,
   ) async {
-    if (_isCheckingStatus) return; // Guard chống gọi đồng thời
+    if (_isCheckingStatus) return;
     _isCheckingStatus = true;
     emit(const ModelLoading());
 
@@ -169,33 +210,31 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       await _modelManager.initialize();
       _listenToProgress();
 
-      final gemmaDownloaded =
-          _modelManager.gemmaInfo.status == ModelStatus.downloaded;
-      final geckoDownloaded =
-          _modelManager.geckoInfo.status == ModelStatus.downloaded;
-
-      log_util.log.i('[ModelBloc] Status: gemmaDownloaded=$gemmaDownloaded, geckoDownloaded=$geckoDownloaded');
-      log_util.log.i('[ModelBloc] Status: gemmaInfo.status=${_modelManager.gemmaInfo.status}, geckoInfo.status=${_modelManager.geckoInfo.status}');
+      final activeFileName = _modelManager.activeLlmFileName;
 
       bool gemmaReady = _gemmaService.isReady;
       bool geckoReady = _geckoService.isReady;
       log_util.log.i('[ModelBloc] Before init: gemmaReady=$gemmaReady, geckoReady=$geckoReady');
 
-      // Idempotent: chỉ init Gemma nếu chưa ready và đã download
-      if (gemmaDownloaded && !gemmaReady) {
+      // Kiểm tra active model đã download chưa
+      final activeModel = _modelManager.activeLlmModel;
+      final activeDownloaded = activeModel?.status == ModelStatus.downloaded;
+
+      // Idempotent: chỉ init Gemma nếu chưa ready và active model đã download
+      if (activeDownloaded && !gemmaReady) {
         _gemmaInitCompleter = Completer<bool>();
-        log_util.log.i('[ModelBloc] → Gemma downloaded nhưng chưa ready — gọi _tryInitializeGemma()...');
-        gemmaReady = await _tryInitializeGemma();
+        log_util.log.i('[ModelBloc] → Active model downloaded nhưng chưa ready — gọi _tryInitializeGemma()...');
+        gemmaReady = await _tryInitializeActiveModel();
         _gemmaInitCompleter!.complete(gemmaReady);
-        log_util.log.i('[ModelBloc] _tryInitializeGemma() → gemmaReady=$gemmaReady');
-      } else if (!gemmaDownloaded) {
-        log_util.log.i('[ModelBloc] → Gemma chưa download — skip init');
+        log_util.log.i('[ModelBloc] _tryInitializeActiveModel() → gemmaReady=$gemmaReady');
+      } else if (!activeDownloaded) {
+        log_util.log.i('[ModelBloc] → Active model chưa download — skip init');
       } else {
-        log_util.log.i('[ModelBloc] → Gemma đã ready — skip init');
+        log_util.log.i('[ModelBloc] → Active model đã ready — skip init');
       }
 
       // Idempotent: chỉ init Gecko nếu chưa ready và đã download
-      if (geckoDownloaded && !geckoReady) {
+      if (_modelManager.geckoInfo.status == ModelStatus.downloaded && !geckoReady) {
         log_util.log.i('[ModelBloc] → Gecko downloaded nhưng chưa ready — kiểm tra tokenizer...');
         final tokenizerValid =
             await _modelManager.isModelFileValid(kGeckoTokenizerFileName);
@@ -207,7 +246,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
         );
         geckoReady = await _tryInitializeGecko();
         log_util.log.i('[ModelBloc] _tryInitializeGecko() → geckoReady=$geckoReady');
-      } else if (!geckoDownloaded) {
+      } else if (_modelManager.geckoInfo.status != ModelStatus.downloaded) {
         log_util.log.i('[ModelBloc] → Gecko chưa download — skip init');
       } else {
         log_util.log.i('[ModelBloc] → Gecko đã ready — skip init');
@@ -215,10 +254,11 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
 
       log_util.log.i('[ModelBloc] _onStatusChecked hoàn tất: gemmaReady=$gemmaReady, geckoReady=$geckoReady');
       emit(ModelLoaded(
-        gemmaInfo: _modelManager.gemmaInfo,
+        llmModels: _modelManager.allLlmModels,
         geckoInfo: _modelManager.geckoInfo,
         gemmaReady: gemmaReady,
         geckoReady: geckoReady,
+        activeLlmFileName: activeFileName,
       ));
     } catch (e) {
       log_util.log.e('[ModelBloc] _onStatusChecked lỗi: $e');
@@ -237,19 +277,20 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
 
     _modelManager.downloadGemma().catchError((e) {
       add(_ProgressUpdate(
-        gemmaInfo: _modelManager.gemmaInfo.copyWith(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo.copyWith(
           status: ModelStatus.error,
           errorMessage: e.toString(),
         ),
-        geckoInfo: _modelManager.geckoInfo,
       ));
     });
 
     emit(ModelLoaded(
-      gemmaInfo: _modelManager.gemmaInfo,
+      llmModels: _modelManager.allLlmModels,
       geckoInfo: _modelManager.geckoInfo,
       gemmaReady: _gemmaService.isReady,
       geckoReady: _geckoService.isReady,
+      activeLlmFileName: _modelManager.activeLlmFileName,
     ));
   }
 
@@ -261,7 +302,7 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
 
     _modelManager.downloadGecko().catchError((e) {
       add(_ProgressUpdate(
-        gemmaInfo: _modelManager.gemmaInfo,
+        llmModels: _modelManager.allLlmModels,
         geckoInfo: _modelManager.geckoInfo.copyWith(
           status: ModelStatus.error,
           errorMessage: e.toString(),
@@ -272,10 +313,11 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     _modelManager.downloadGeckoTokenizer().catchError((_) {});
 
     emit(ModelLoaded(
-      gemmaInfo: _modelManager.gemmaInfo,
+      llmModels: _modelManager.allLlmModels,
       geckoInfo: _modelManager.geckoInfo,
       gemmaReady: _gemmaService.isReady,
       geckoReady: _geckoService.isReady,
+      activeLlmFileName: _modelManager.activeLlmFileName,
     ));
   }
 
@@ -287,13 +329,133 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       await _modelManager.cancelDownload(event.fileName);
       await _modelManager.initialize();
       emit(ModelLoaded(
-        gemmaInfo: _modelManager.gemmaInfo,
+        llmModels: _modelManager.allLlmModels,
         geckoInfo: _modelManager.geckoInfo,
         gemmaReady: _gemmaService.isReady,
         geckoReady: _geckoService.isReady,
+        activeLlmFileName: _modelManager.activeLlmFileName,
       ));
     } catch (e) {
       emit(ModelError(e.toString()));
+    }
+  }
+
+  // ─── NEW Handlers ────────────────────────────────────────────────────────
+
+  Future<void> _onModelDownloadRequested(
+    ModelDownloadRequested event,
+    Emitter<ModelState> emit,
+  ) async {
+    _listenToProgress();
+
+    unawaited(_modelManager.downloadModel(event.fileName).catchError((e) {
+      add(_ProgressUpdate(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo,
+      ));
+    }));
+
+    emit(ModelLoaded(
+      llmModels: _modelManager.allLlmModels,
+      geckoInfo: _modelManager.geckoInfo,
+      gemmaReady: _gemmaService.isReady,
+      geckoReady: _geckoService.isReady,
+      activeLlmFileName: _modelManager.activeLlmFileName,
+    ));
+  }
+
+  Future<void> _onActiveModelChanged(
+    ActiveModelChanged event,
+    Emitter<ModelState> emit,
+  ) async {
+    try {
+      log_util.log.i('[ModelBloc] ActiveModelChanged: ${event.fileName}');
+
+      // Lưu active model vào SharedPreferences
+      await _modelManager.setActiveLlmModel(event.fileName);
+
+      // Kiểm tra model đã download chưa
+      final modelDownloaded = await _modelManager.isModelDownloaded(event.fileName);
+      bool gemmaReady = _gemmaService.isReady;
+
+      if (modelDownloaded) {
+        // Nếu đã download, switch model ngay
+        final modelPath = await _modelManager.getModelPath(event.fileName);
+        await _gemmaService.switchModel(
+          modelPath: modelPath,
+          maxTokens: DeviceCapabilityHolder.contextWindow,
+        );
+        gemmaReady = _gemmaService.isReady;
+      } else {
+        // Nếu chưa download, close session hiện tại
+        await _gemmaService.closeSession();
+        gemmaReady = false;
+      }
+
+      emit(ModelLoaded(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo,
+        gemmaReady: gemmaReady,
+        geckoReady: _geckoService.isReady,
+        activeLlmFileName: event.fileName,
+      ));
+    } catch (e) {
+      log_util.log.e('[ModelBloc] ActiveModelChanged lỗi: $e');
+      emit(ModelLoaded(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo,
+        gemmaReady: _gemmaService.isReady,
+        geckoReady: _geckoService.isReady,
+        activeLlmFileName: event.fileName,
+      ));
+    }
+  }
+
+  Future<void> _onModelDeleted(
+    ModelDeleted event,
+    Emitter<ModelState> emit,
+  ) async {
+    try {
+      log_util.log.i('[ModelBloc] ModelDeleted: ${event.fileName}');
+
+      // Nếu đang active model này, đóng session trước
+      final wasActive = event.fileName == _modelManager.activeLlmFileName;
+      if (wasActive) {
+        await _gemmaService.closeSession();
+      }
+
+      // Xoá model
+      await _modelManager.deleteModel(event.fileName);
+
+      // Nếu là active model, chuyển về default
+      if (wasActive) {
+        await _modelManager.setActiveLlmModel(kDefaultModelFileName);
+        // Nếu default đã download, switch
+        if (await _modelManager.isModelDownloaded(kDefaultModelFileName)) {
+          final defaultPath = await _modelManager.getModelPath(kDefaultModelFileName);
+          await _gemmaService.switchModel(
+            modelPath: defaultPath,
+            maxTokens: DeviceCapabilityHolder.contextWindow,
+          );
+        }
+      }
+
+      emit(ModelLoaded(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo,
+        gemmaReady: _gemmaService.isReady,
+        geckoReady: _geckoService.isReady,
+        activeLlmFileName: _modelManager.activeLlmFileName,
+      ));
+    } catch (e) {
+      log_util.log.e('[ModelBloc] ModelDeleted lỗi: $e');
+      emit(ModelLoaded(
+        llmModels: _modelManager.allLlmModels,
+        geckoInfo: _modelManager.geckoInfo,
+        gemmaReady: _gemmaService.isReady,
+        geckoReady: _geckoService.isReady,
+        activeLlmFileName: _modelManager.activeLlmFileName,
+      ));
     }
   }
 
@@ -304,8 +466,14 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     bool gemmaReady = _gemmaService.isReady;
     bool geckoReady = _geckoService.isReady;
 
-    if (event.gemmaInfo.status == ModelStatus.downloaded && !gemmaReady) {
-      gemmaReady = await _tryInitializeGemma();
+    // Nếu active model vừa download xong → init
+    final activeModel = event.llmModels.firstWhere(
+      (m) => m.fileName == event.activeLlmFileName,
+      orElse: () => event.llmModels.first,
+    );
+
+    if (activeModel.status == ModelStatus.downloaded && !gemmaReady) {
+      gemmaReady = await _tryInitializeActiveModel();
     }
 
     if (event.geckoInfo.status == ModelStatus.downloaded &&
@@ -315,21 +483,30 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
     }
 
     emit(ModelLoaded(
-      gemmaInfo: event.gemmaInfo,
+      llmModels: event.llmModels,
       geckoInfo: event.geckoInfo,
       gemmaReady: gemmaReady,
       geckoReady: geckoReady,
+      activeLlmFileName: event.activeLlmFileName,
     ));
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
-  Future<bool> _tryInitializeGemma() async {
+  Future<bool> _tryInitializeActiveModel() async {
     try {
-      final path = await _modelManager.getModelPath(kGemmaModelFileName);
-      await _gemmaService.initialize(modelPath: path);
+      final activeFileName = _modelManager.activeLlmFileName;
+      final path = await _modelManager.getModelPath(activeFileName);
+      final file = File(path);
+      if (!await file.exists()) return false;
+
+      await _gemmaService.switchModel(
+        modelPath: path,
+        maxTokens: DeviceCapabilityHolder.contextWindow,
+      );
       return _gemmaService.isReady;
-    } catch (_) {
+    } catch (e) {
+      log_util.log.e('[ModelBloc] _tryInitializeActiveModel lỗi: $e');
       return false;
     }
   }
@@ -361,8 +538,8 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
   void _listenToProgress() {
     _progressSubscription?.cancel();
     _progressSubscription = _modelManager.progressStream.listen((info) {
-      final currentGemma = _modelManager.gemmaInfo;
       final currentGecko = _modelManager.geckoInfo;
+      final currentModels = _modelManager.allLlmModels;
 
       if (info.fileName == kGeckoTokenizerFileName) {
         if (info.status == ModelStatus.downloaded) {
@@ -373,9 +550,10 @@ class ModelBloc extends Bloc<ModelEvent, ModelState> {
       }
 
       add(_ProgressUpdate(
-        gemmaInfo: info.fileName == currentGemma.fileName ? info : currentGemma,
+        llmModels: currentModels,
         geckoInfo: info.fileName == currentGecko.fileName ? info : currentGecko,
         tokenizerDownloaded: _tokenizerDownloaded,
+        activeLlmFileName: _modelManager.activeLlmFileName,
       ));
     });
   }

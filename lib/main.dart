@@ -52,8 +52,13 @@ void main() async {
   // Setup dependency injection
   await setupLocator();
 
-  // Initialize GemmaService với contextWindow động (sau khi setupLocator)
-  await sl<GemmaService>().initialize(maxTokens: contextWindow);
+  // Initialize GemmaService với contextWindow động (sau khi setupLocator).
+  // Graceful: nếu chưa có model, không crash — ModelBloc sẽ init sau.
+  try {
+    await sl<GemmaService>().initialize(maxTokens: contextWindow);
+  } catch (e) {
+    log_util.log.w('⚠️ [main] Gemma init failed (expected if no model): $e');
+  }
 
   runApp(const App());
 }

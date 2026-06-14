@@ -31,8 +31,6 @@ class ChatPage extends StatelessWidget {
   }
 }
 
-/// Quản lý dialog loading model khi vào màn hình chat.
-/// Dùng StatefulWidget để có lifecycle initState/dispose cho dialog.
 class ChatView extends StatefulWidget {
   final String sessionId;
   const ChatView({required this.sessionId, super.key});
@@ -48,7 +46,6 @@ class _ChatViewState extends State<ChatView> {
   @override
   void initState() {
     super.initState();
-    // Kiểm tra trạng thái model ngay sau khi build frame đầu tiên
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkModelAndShowDialog(context);
     });
@@ -61,29 +58,28 @@ class _ChatViewState extends State<ChatView> {
     final modelState = modelBloc.state;
 
     if (modelState is ModelLoaded) {
-      final isGemmaDownloaded =
-          modelState.gemmaInfo.status == ModelStatus.downloaded;
+      // Kiểm tra active model đã download chưa
+      final activeModel = modelState.llmModels.firstWhere(
+        (m) => m.fileName == modelState.activeLlmFileName,
+        orElse: () => modelState.llmModels.first,
+      );
+      final isLlmDownloaded =
+          activeModel.status == ModelStatus.downloaded;
 
-      // Nếu model chưa download → ChatBloc sẽ emit ChatError.needsModelDownload
-      // → banner warning xử lý, không cần dialog
-      if (!isGemmaDownloaded) {
+      if (!isLlmDownloaded) {
         _hideLoadingDialog();
         return;
       }
 
-      // Dialog này chỉ dành cho Gemma chat model. Gecko có trạng thái riêng
-      // trên nút đính kèm file, nên không chặn toàn bộ màn hình chat.
       if (modelState.gemmaReady) {
         _hideLoadingDialog();
         return;
       }
 
-      // Dispatch StatusChecked để init phần chưa ready (idempotent)
       if (!modelBloc.isInitializingGemma) {
         modelBloc.add(const StatusChecked());
       }
 
-      // Show dialog loading — listener của ChatView sẽ tự đóng khi Gemma ready
       _showLoadingDialog();
     } else if (modelState is ModelLoading) {
       // ModelBloc đang loading → chờ init xong
@@ -94,10 +90,14 @@ class _ChatViewState extends State<ChatView> {
     if (!mounted) return;
 
     if (state is ModelLoaded) {
-      final isGemmaDownloaded =
-          state.gemmaInfo.status == ModelStatus.downloaded;
+      final activeModel = state.llmModels.firstWhere(
+        (m) => m.fileName == state.activeLlmFileName,
+        orElse: () => state.llmModels.first,
+      );
+      final isLlmDownloaded =
+          activeModel.status == ModelStatus.downloaded;
 
-      if (!isGemmaDownloaded) {
+      if (!isLlmDownloaded) {
         _hideLoadingDialog();
         return;
       }
@@ -111,8 +111,6 @@ class _ChatViewState extends State<ChatView> {
         return;
       }
 
-      // StatusChecked đã chạy xong nhưng Gemma vẫn chưa ready: đóng dialog để
-      // tránh kẹt modal vĩnh viễn, người dùng có thể retry từ Model Manager.
       if (!context.read<ModelBloc>().isInitializingGemma) {
         _hideLoadingDialog();
       }
@@ -154,7 +152,7 @@ class _ChatViewState extends State<ChatView> {
               ),
               SizedBox(height: AppSpacing.sm),
               Text(
-                'Model Gemma (2.8GB) đang được load. '
+                'Model AI đang được load. '
                 'Vui lòng đợi trong giây lát.',
                 style: TextStyle(
                   fontSize: 13,
@@ -208,18 +206,11 @@ class _ChatViewState extends State<ChatView> {
         ),
         body: Column(
           children: [
-            // ─── Banner "Chưa tải model" ──────────────────────────────────
             const ModelNotInstalledBanner(),
-
-            // Chat body (loading / error / messages)
             Expanded(
               child: ChatBody(sessionId: widget.sessionId),
             ),
-
-            // Attached files bar
             AttachedFilesBar(sessionId: widget.sessionId),
-
-            // Input bar
             ChatInputBar(sessionId: widget.sessionId),
           ],
         ),

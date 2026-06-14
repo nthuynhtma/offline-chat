@@ -38,8 +38,8 @@ class DeviceCapability {
         final ramGB = androidInfo.physicalRamSize / 1024;
         log_util.log.d('📱 [Device] Android RAM: ${ramGB.toStringAsFixed(1)}GB');
 
-        if (ramGB >= 8) return DeviceTier.high;
-        if (ramGB >= 6) return DeviceTier.medium;
+        if (ramGB > 7) return DeviceTier.high;
+        if (ramGB > 5) return DeviceTier.medium;
         return DeviceTier.low;
       }
 

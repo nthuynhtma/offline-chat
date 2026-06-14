@@ -117,7 +117,7 @@ class _ModelOnboardingCoordinatorState
           ),
           content: const Text(
             'Để chat được, vui lòng tải model AI.\n\n'
-            '• Gemma (2.6GB) — model chat chính\n'
+            '• Qwen2.5-1.5B (1.5GB) — model chat chính (mặc định)\n'
             '• Gecko (111MB) — model nhúng văn bản\n\n'
             'Cả hai sẽ được tải cùng lúc, một lần duy nhất và '
             'hoạt động hoàn toàn ngoại tuyến.',
@@ -185,17 +185,18 @@ class _ModelOnboardingCoordinatorState
               );
             }
 
-            final gemmaInfo = state.gemmaInfo;
+            // Lấy active LLM model (default = Qwen2.5)
+            final llmModel = state.llmModels.isNotEmpty
+                ? state.llmModels.first
+                : null;
             final geckoInfo = state.geckoInfo;
 
-            final gemmaDone =
-                gemmaInfo.status == ModelStatus.downloaded;
-            final geckoDone =
-                geckoInfo.status == ModelStatus.downloaded;
-            final gemmaError = gemmaInfo.status == ModelStatus.error;
+            final llmDone = llmModel?.status == ModelStatus.downloaded;
+            final geckoDone = geckoInfo.status == ModelStatus.downloaded;
+            final llmError = llmModel?.status == ModelStatus.error;
             final geckoError = geckoInfo.status == ModelStatus.error;
-            final anyError = gemmaError || geckoError;
-            final allDone = gemmaDone && geckoDone;
+            final anyError = llmError || geckoError;
+            final allDone = llmDone && geckoDone;
 
             // Cả hai hoàn tất → đóng dialog + SnackBar
             if (allDone) {
@@ -240,11 +241,11 @@ class _ModelOnboardingCoordinatorState
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── Gemma progress ──
+                  // ── Qwen2.5 progress ──
                   _buildModelProgressRow(
                     context: innerContext,
-                    name: 'Gemma (chat)',
-                    info: gemmaInfo,
+                    name: llmModel?.name ?? 'LLM (chat)',
+                    info: llmModel ?? const ModelInfo(name: 'Unknown', fileName: '', downloadUrl: '', fileSizeBytes: 0, modelType: ModelType.llm),
                   ),
                   const SizedBox(height: AppSpacing.md),
                   // ── Gecko progress ──
@@ -268,9 +269,15 @@ class _ModelOnboardingCoordinatorState
                       FilledButton(
                         onPressed: () {
                           // Thử lại cả hai
-                          innerContext
-                              .read<ModelBloc>()
-                              .add(const GemmaDownloadStarted());
+              // Tải active LLM model (Qwen2.5 mặc định)
+              final activeFile = innerContext
+                  .read<ModelBloc>()
+                  .state;
+              if (activeFile is ModelLoaded) {
+                innerContext
+                    .read<ModelBloc>()
+                    .add(ModelDownloadRequested(activeFile.activeLlmFileName));
+              }
                           innerContext
                               .read<ModelBloc>()
                               .add(const GeckoDownloadStarted());
@@ -290,7 +297,11 @@ class _ModelOnboardingCoordinatorState
     // Dispatch download cả hai model (idempotent — service có guard)
     final blocCtx = widget.navigatorKey.currentContext;
     if (blocCtx != null && mounted) {
-      blocCtx.read<ModelBloc>().add(const GemmaDownloadStarted());
+      // Lấy active LLM model từ state và download
+      final modelState = blocCtx.read<ModelBloc>().state;
+      if (modelState is ModelLoaded) {
+        blocCtx.read<ModelBloc>().add(ModelDownloadRequested(modelState.activeLlmFileName));
+      }
       blocCtx.read<ModelBloc>().add(const GeckoDownloadStarted());
     }
   }
@@ -402,16 +413,19 @@ class _ModelOnboardingCoordinatorState
         final p2 = !_hasSeenOnboarding;
         final p3 = curr is ModelLoaded;
         final p4 = curr is ModelLoaded &&
-            curr.gemmaInfo.status == ModelStatus.notDownloaded;
+            curr.llmModels.every((m) => m.status == ModelStatus.notDownloaded);
         final result = p0 && p1 && p2 && p3 && p4;
 
+        final llmStatuses = curr is ModelLoaded
+            ? curr.llmModels.map((m) => '${m.fileName}=${m.status.name}').join(', ')
+            : 'N/A';
         log_util.log.i(
             '[Onboarding] listenWhen check: '
             '_promptCompleted=$_promptCompleted(p0=$p0), '
             '_isDialogVisible=$_isDialogVisible(p1=$p1), '
             '_hasSeenOnboarding=$_hasSeenOnboarding(p2=$p2), '
             'curr=ModelLoaded(p3=$p3), '
-            'gemmaInfo.status=${curr is ModelLoaded ? curr.gemmaInfo.status : 'N/A'}(p4=$p4) '
+            'llmStatuses=[$llmStatuses](p4=$p4) '
             '→ result=$result');
 
         return result;

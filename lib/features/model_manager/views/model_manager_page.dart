@@ -4,6 +4,8 @@ import 'package:offline_chat/core/constants/app_colors.dart';
 import 'package:offline_chat/core/constants/app_spacing.dart';
 import 'package:offline_chat/features/model_manager/bloc/model_bloc.dart';
 import 'package:offline_chat/services/model_manager/model_manager_service.dart';
+import 'package:offline_chat/core/constants/model_constants.dart';
+import 'package:offline_chat/core/utils/logger.dart' as log_util;
 
 class ModelManagerPage extends StatelessWidget {
   const ModelManagerPage({super.key});
@@ -29,32 +31,46 @@ class _ModelManagerView extends StatelessWidget {
             case ModelInitial():
             case ModelLoading():
               return const Center(child: CircularProgressIndicator());
-            case ModelLoaded(:final gemmaInfo, :final geckoInfo):
+            case ModelLoaded(:final llmModels, :final geckoInfo, :final activeLlmFileName, :final gemmaReady, :final geckoReady):
               return ListView(
                 padding: const EdgeInsets.all(AppSpacing.md),
                 children: [
-                  _SectionHeader(title: 'Language Model'),
+                  _SectionHeader(title: 'Language Models (LLM)'),
                   const SizedBox(height: AppSpacing.sm),
-                  _ModelStatusCard(
-                    modelInfo: gemmaInfo,
-                    onDownload: () => context
-                        .read<ModelBloc>()
-                        .add(const GemmaDownloadStarted()),
-                    onCancel: () => context
-                        .read<ModelBloc>()
-                        .add(DownloadCancelled(gemmaInfo.fileName)),
-                  ),
+                  ...llmModels.map((model) => Padding(
+                    padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                    child: _ModelStatusCard(
+                      modelInfo: model,
+                      isActive: model.fileName == activeLlmFileName,
+                      isReady: model.fileName == activeLlmFileName ? gemmaReady : false,
+                      onDownload: () => context
+                          .read<ModelBloc>()
+                          .add(ModelDownloadRequested(model.fileName)),
+                      onActivate: model.status == ModelStatus.downloaded
+                          ? () => context
+                              .read<ModelBloc>()
+                              .add(ActiveModelChanged(model.fileName))
+                          : null,
+                      onDelete: model.fileName != kDefaultModelFileName
+                          ? () => _confirmDeleteModel(context, model)
+                          : null,
+                    ),
+                  )),
                   const SizedBox(height: AppSpacing.lg),
                   _SectionHeader(title: 'Embedding Model'),
                   const SizedBox(height: AppSpacing.sm),
                   _ModelStatusCard(
                     modelInfo: geckoInfo,
+                    isActive: false,
+                    isReady: geckoReady,
                     onDownload: () => context
                         .read<ModelBloc>()
                         .add(const GeckoDownloadStarted()),
                     onCancel: () => context
                         .read<ModelBloc>()
                         .add(DownloadCancelled(geckoInfo.fileName)),
+                    onActivate: null,
+                    onDelete: null,
                   ),
                   const SizedBox(height: AppSpacing.lg),
                   _PrivacyNote(),
@@ -88,6 +104,34 @@ class _ModelManagerView extends StatelessWidget {
       ),
     );
   }
+
+  void _confirmDeleteModel(BuildContext context, ModelInfo model) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.warning_amber_rounded, size: 48, color: Colors.orange),
+        title: Text('Xoá model "${model.name}"?'),
+        content: const Text(
+          'File model sẽ bị xoá khỏi thiết bị. '
+          'Bạn có thể tải lại sau.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Huỷ'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              context.read<ModelBloc>().add(ModelDeleted(model.fileName));
+            },
+            icon: const Icon(Icons.delete_forever),
+            label: const Text('Xoá'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -107,13 +151,21 @@ class _SectionHeader extends StatelessWidget {
 
 class _ModelStatusCard extends StatelessWidget {
   final ModelInfo modelInfo;
-  final VoidCallback onDownload;
-  final VoidCallback onCancel;
+  final bool isActive;
+  final bool isReady;
+  final VoidCallback? onDownload;
+  final VoidCallback? onActivate;
+  final VoidCallback? onDelete;
+  final VoidCallback? onCancel;
 
   const _ModelStatusCard({
     required this.modelInfo,
-    required this.onDownload,
-    required this.onCancel,
+    required this.isActive,
+    required this.isReady,
+    this.onDownload,
+    this.onActivate,
+    this.onDelete,
+    this.onCancel,
   });
 
   @override
@@ -127,7 +179,9 @@ class _ModelStatusCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  Icons.model_training,
+                  modelInfo.modelType == ModelType.embedding
+                      ? Icons.auto_fix_high
+                      : Icons.model_training,
                   color: _statusColor,
                 ),
                 const SizedBox(width: AppSpacing.sm),
@@ -135,23 +189,47 @@ class _ModelStatusCard extends StatelessWidget {
                   child: Text(
                     modelInfo.name,
                     style: Theme.of(context).textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
                   ),
                 ),
                 _StatusBadge(status: modelInfo.status),
               ],
             ),
             const SizedBox(height: AppSpacing.sm),
-            Text(
-              _formatBytes(modelInfo.fileSizeBytes),
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.subtleLight,
+            Row(
+              children: [
+                Text(
+                  _formatBytes(modelInfo.fileSizeBytes),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppColors.subtleLight,
+                      ),
+                ),
+                const Spacer(),
+                // Active indicator
+                if (modelInfo.modelType == ModelType.llm && isActive)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppColors.success.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Text(
+                      'Đang dùng',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.success,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
                   ),
+              ],
             ),
             if (modelInfo.status == ModelStatus.downloading) ...[
               const SizedBox(height: AppSpacing.sm),
               _DownloadProgressCard(
                 progress: modelInfo.progress,
-                onCancel: onCancel,
+                onCancel: onCancel ?? () {},
               ),
             ],
             if (modelInfo.status == ModelStatus.error &&
@@ -165,26 +243,49 @@ class _ModelStatusCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: AppSpacing.sm),
-            if (modelInfo.status == ModelStatus.notDownloaded)
+
+            // Download / Active / Delete buttons
+            if (modelInfo.status == ModelStatus.notDownloaded && onDownload != null)
               FilledButton.icon(
                 onPressed: onDownload,
                 icon: const Icon(Icons.download),
                 label: const Text('Tải xuống'),
               ),
-            if (modelInfo.status == ModelStatus.downloaded)
-              Row(
-                children: [
-                  const Icon(Icons.check_circle,
-                      size: 16, color: AppColors.success),
-                  const SizedBox(width: AppSpacing.xs),
-                  Text(
-                    'Sẵn sàng sử dụng',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.success,
-                        ),
+            if (modelInfo.status == ModelStatus.downloaded) ...[
+              // Active radio button
+              if (modelInfo.modelType == ModelType.llm && !isActive && onActivate != null)
+                OutlinedButton.icon(
+                  onPressed: onActivate,
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Chọn làm model mặc định'),
+                ),
+              if (isActive && modelInfo.modelType == ModelType.llm)
+                Row(
+                  children: [
+                    const Icon(Icons.check_circle,
+                        size: 16, color: AppColors.success),
+                    const SizedBox(width: AppSpacing.xs),
+                    Text(
+                      isReady ? 'Sẵn sàng' : 'Chưa nạp',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: isReady
+                                ? AppColors.success
+                                : AppColors.warning,
+                          ),
+                    ),
+                  ],
+                ),
+              // Delete button
+              if (onDelete != null)
+                TextButton.icon(
+                  onPressed: onDelete,
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('Xoá'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.error,
                   ),
-                ],
-              ),
+                ),
+            ],
           ],
         ),
       ),

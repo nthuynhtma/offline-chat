@@ -17,14 +17,14 @@ class ModelNotInstalledBanner extends StatelessWidget {
     return BlocBuilder<ModelBloc, ModelState>(
       buildWhen: (prev, curr) {
         final prevNeeds = prev is ModelLoaded &&
-            prev.gemmaInfo.status != ModelStatus.downloaded;
+            prev.llmModels.every((m) => m.status != ModelStatus.downloaded);
         final currNeeds = curr is ModelLoaded &&
-            curr.gemmaInfo.status != ModelStatus.downloaded;
+            curr.llmModels.every((m) => m.status != ModelStatus.downloaded);
         return prevNeeds != currNeeds;
       },
       builder: (context, state) {
         final shouldShow = state is ModelLoaded &&
-            state.gemmaInfo.status != ModelStatus.downloaded;
+            state.llmModels.every((m) => m.status != ModelStatus.downloaded);
 
         if (shouldShow) {
           return Container(
